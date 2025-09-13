@@ -1,0 +1,34 @@
+{
+  "manifest_version": 3,
+  "name": "Video Downloader Assistant",
+  "version": "1.0.0",
+  "description": "Detecta vídeos na página e permite baixar via Video Downloader app",
+
+  "permissions": [
+    "activeTab",
+    "storage",
+    "cookies",
+    "scripting",
+    "debugger",
+    "tabs",
+    "webRequest"
+  ],
+  "host_permissions": ["<all_urls>"],
+
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content-universal.js"],
+      "run_at": "document_end"
+    }
+  ],
+
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Video Downloader"
+  },
+
+  "background": {
+    "service_worker": "background.js"
+  }
+}

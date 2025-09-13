@@ -1,0 +1,9 @@
+// Placeholder - substitua por ícones PNG reais
+// Para criar ícones:
+// 1. Use qualquer editor de imagem (Paint, GIMP, Canva)
+// 2. Crie imagens 16x16, 48x48, 128x128 pixels
+// 3. Use ícone de vídeo/download (🎬 📥)
+// 4. Salve como icon16.png, icon48.png, icon128.png
+// 5. Coloque nesta pasta
+
+console.log("Substitua este arquivo pelos ícones PNG reais da extensão");
