@@ -110,30 +110,36 @@ class UniversalVideoDetector {
       });
     });
 
-    // 2. URL DA PÁGINA ATUAL
-    const currentUrl = window.location.href;
-    if (this.isVideoURL(currentUrl)) {
-      videos.push({
-        type: "page_url",
-        url: currentUrl,
-        title: document.title,
-        element: null,
-        source: "Page URL",
-      });
-    }
-
-    // 3. IFRAMES (embeds)
+    // 3. IFRAMES (embeds) - PRIORIDADE ALTA para BunnyCDN
     document.querySelectorAll("iframe").forEach((iframe) => {
       if (iframe.src && this.isVideoURL(iframe.src)) {
+        // Prioridade para iframe de vídeo (BunnyCDN, etc.)
+        const priority = iframe.src.includes("iframe.mediadelivery.net")
+          ? 1
+          : 5;
         videos.push({
           type: "iframe",
           url: iframe.src,
           title: this.getVideoTitle(iframe),
           element: iframe,
           source: "iframe Embed",
+          priority: priority,
         });
       }
     });
+
+    // 2. URL DA PÁGINA ATUAL - PRIORIDADE BAIXA
+    const currentUrl = window.location.href;
+    if (this.isVideoURL(currentUrl) && !currentUrl.includes("classroom")) {
+      videos.push({
+        type: "page_url",
+        url: currentUrl,
+        title: document.title,
+        element: null,
+        source: "Page URL",
+        priority: 10, // Baixa prioridade para URLs de página
+      });
+    }
 
     // 4. LINKS DIRETOS para arquivos de vídeo
     document.querySelectorAll("a[href]").forEach((link) => {
@@ -636,12 +642,23 @@ class UniversalVideoDetector {
   processDetectedVideos(videos) {
     if (videos.length === 0) return;
 
-    // Remove duplicatas baseado na URL
-    const uniqueVideos = videos.filter((video) => {
-      const key = video.url;
-      if (this.detectedVideos.has(key)) return false;
-      this.detectedVideos.add(key);
-      return true;
+    // Ordena vídeos por prioridade (iframes de vídeo primeiro)
+    const sortedVideos = videos.sort((a, b) => {
+      const priorityA = a.priority || 5;
+      const priorityB = b.priority || 5;
+      return priorityA - priorityB;
+    });
+
+    // Remove duplicatas baseado na URL, mantendo ordem de prioridade
+    const uniqueVideos = [];
+    const seenUrls = new Set();
+
+    sortedVideos.forEach((video) => {
+      if (!seenUrls.has(video.url)) {
+        seenUrls.add(video.url);
+        uniqueVideos.push(video);
+        this.detectedVideos.add(video.url);
+      }
     });
 
     if (uniqueVideos.length > 0) {

@@ -90,6 +90,14 @@ function isVideoRequest(url) {
     return true;
   }
 
+  // PRIORIDADE: URLs diretas de CDNs de vídeo (BunnyCDN, etc.)
+  if (url.includes("iframe.mediadelivery.net/embed/")) {
+    return true;
+  }
+  if (url.includes("bunnycdn.com") || url.includes("b-cdn.net")) {
+    return true;
+  }
+
   // Domínios conhecidos de vídeo
   const videoDomains = [
     "googlevideo.com",
