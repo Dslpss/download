@@ -36,7 +36,9 @@ Name: "installextension"; Description: "Instalar extensão do Chrome"
 [Files]
 Source: "dist\VideoDownloader.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "browser-extension\*"; DestDir: "{app}\extension"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "scripts\install_chrome_extension.bat"; DestDir: "{app}\scripts"; Flags: ignoreversion
 Source: "install_extension.ps1"; DestDir: "{app}"; Flags: ignoreversion
+Source: "GUIA_EXTENSAO_CHROME.md"; DestDir: "{app}"; DestName: "GUIA_EXTENSAO.txt"; Flags: ignoreversion
 #if FileExists("README.md")
 Source: "README.md"; DestDir: "{app}"; Flags: ignoreversion isreadme
 #endif
@@ -49,13 +51,14 @@ Source: "INSTALLER_GUIDE.md"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
 Name: "{group}\Video Downloader"; Filename: "{app}\VideoDownloader.exe"
-Name: "{group}\Instalar Extensão"; Filename: "powershell.exe"; Parameters: "-ExecutionPolicy Bypass -File ""{app}\install_extension.ps1"""
+Name: "{group}\Instalar Extensão Chrome"; Filename: "{app}\scripts\install_chrome_extension.bat"; WorkingDir: "{app}"; IconFilename: "{app}\VideoDownloader.exe"
+Name: "{group}\Guia da Extensão"; Filename: "{app}\GUIA_EXTENSAO.txt"
 Name: "{group}\{cm:UninstallProgram,Video Downloader}"; Filename: "{uninstallexe}"
 Name: "{autodesktop}\Video Downloader"; Filename: "{app}\VideoDownloader.exe"; Tasks: desktopicon
 
 [Run]
 Filename: "{app}\VideoDownloader.exe"; Description: "Executar Video Downloader"; Flags: nowait postinstall skipifsilent
-Filename: "powershell.exe"; Parameters: "-ExecutionPolicy Bypass -File ""{app}\install_extension.ps1"""; Description: "Instalar extensão do Chrome"; Flags: runhidden postinstall; Tasks: installextension
+Filename: "{app}\scripts\install_chrome_extension.bat"; Description: "Instalar extensão do Chrome agora"; Flags: nowait postinstall skipifsilent unchecked; Tasks: installextension
 
 [UninstallDelete]
 Type: filesandordirs; Name: "{app}\extension"

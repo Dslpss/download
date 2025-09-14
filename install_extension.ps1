@@ -124,7 +124,7 @@ function Main {
     
     # Determina caminho da extensão
     $ScriptPath = Split-Path -Parent $MyInvocation.MyCommand.Path
-    $ExtensionPath = Join-Path $ScriptPath "extension"
+    $ExtensionPath = Join-Path $ScriptPath "browser-extension"
     
     # Instala a extensão
     $Success = Install-ChromeExtension -ExtensionPath $ExtensionPath
