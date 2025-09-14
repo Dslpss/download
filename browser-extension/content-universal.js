@@ -58,6 +58,7 @@ console.log("Video Downloader Assistant - Modo Universal carregado");
 class UniversalVideoDetector {
   constructor() {
     this.detectedVideos = new Set();
+    this.dismissedVideos = new Set(); // Vídeos que o usuário dispensou
     this.observer = null;
     this.networkUrls = new Set();
     this.init();
@@ -83,26 +84,65 @@ class UniversalVideoDetector {
   scanForVideos() {
     const videos = [];
 
+    // Primeiro tenta capturar título real da página uma vez
+    const pageVideoTitle = this.findRealVideoTitle();
+
     // 1. ELEMENTOS <video> nativos
-    document.querySelectorAll("video").forEach((video) => {
+    document.querySelectorAll("video").forEach((video, index) => {
       const src = video.src || video.currentSrc;
       if (src && src.startsWith("http")) {
+        let videoTitle = this.getVideoTitle(video);
+
+        // Se não encontrou título específico, usa o título real da página
+        if (
+          (videoTitle === document.title ||
+            videoTitle.includes("Vídeo sem título")) &&
+          pageVideoTitle
+        ) {
+          videoTitle = pageVideoTitle;
+        } else if (
+          videoTitle === document.title ||
+          videoTitle.includes("Vídeo sem título")
+        ) {
+          videoTitle = `HTML5 Video ${index + 1} - ${this.extractTitleFromURL(
+            src
+          )}`;
+        }
+
         videos.push({
           type: "video_element",
           url: src,
-          title: this.getVideoTitle(video),
+          title: videoTitle,
           element: video,
           source: "HTML5 Video",
         });
       }
 
       // Sources dentro do video
-      video.querySelectorAll("source").forEach((source) => {
+      video.querySelectorAll("source").forEach((source, sourceIndex) => {
         if (source.src && source.src.startsWith("http")) {
+          let sourceTitle = this.getVideoTitle(video);
+
+          // Se não encontrou título específico, usa o título real da página
+          if (
+            (sourceTitle === document.title ||
+              sourceTitle.includes("Vídeo sem título")) &&
+            pageVideoTitle
+          ) {
+            sourceTitle = pageVideoTitle;
+          } else if (
+            sourceTitle === document.title ||
+            sourceTitle.includes("Vídeo sem título")
+          ) {
+            sourceTitle = `HTML5 Source ${index + 1}.${
+              sourceIndex + 1
+            } - ${this.extractTitleFromURL(source.src)}`;
+          }
+
           videos.push({
             type: "video_source",
             url: source.src,
-            title: this.getVideoTitle(video),
+            title: sourceTitle,
             element: source,
             source: "HTML5 Source",
           });
@@ -111,16 +151,44 @@ class UniversalVideoDetector {
     });
 
     // 3. IFRAMES (embeds) - PRIORIDADE ALTA para BunnyCDN
-    document.querySelectorAll("iframe").forEach((iframe) => {
+    document.querySelectorAll("iframe").forEach((iframe, index) => {
       if (iframe.src && this.isVideoURL(iframe.src)) {
         // Prioridade para iframe de vídeo (BunnyCDN, etc.)
         const priority = iframe.src.includes("iframe.mediadelivery.net")
           ? 1
           : 5;
+
+        // Título mais específico para iframes
+        let iframeTitle = this.getVideoTitle(iframe);
+
+        // Se não encontrou título específico, usa o título real da página
+        if (
+          (iframeTitle === document.title ||
+            iframeTitle.includes("Vídeo sem título")) &&
+          pageVideoTitle
+        ) {
+          iframeTitle = pageVideoTitle;
+        } else if (
+          iframeTitle === document.title ||
+          iframeTitle.includes("Vídeo sem título")
+        ) {
+          const iframeSrc = iframe.src;
+          if (iframeSrc.includes("mediadelivery.net")) {
+            const urlParts = iframeSrc.split("/");
+            const videoId =
+              urlParts[urlParts.length - 1] || urlParts[urlParts.length - 2];
+            iframeTitle = `BunnyCDN Video - ${videoId}`;
+          } else {
+            iframeTitle = `iframe Video ${
+              index + 1
+            } - ${this.extractTitleFromURL(iframeSrc)}`;
+          }
+        }
+
         videos.push({
           type: "iframe",
           url: iframe.src,
-          title: this.getVideoTitle(iframe),
+          title: iframeTitle,
           element: iframe,
           source: "iframe Embed",
           priority: priority,
@@ -569,10 +637,17 @@ class UniversalVideoDetector {
     try {
       const urlObj = new URL(url);
 
-      // Extrai título baseado no domínio
+      // Extrai título baseado no domínio com mais detalhes
       if (urlObj.hostname.includes("youtube")) {
         const params = new URLSearchParams(urlObj.search);
-        return `YouTube - ${params.get("v") || "Video"}`;
+        const videoId = params.get("v");
+        const listId = params.get("list");
+        if (videoId && listId) {
+          return `YouTube - ${videoId} (Playlist: ${listId.substring(0, 8)})`;
+        } else if (videoId) {
+          return `YouTube - ${videoId}`;
+        }
+        return "YouTube - Video";
       }
 
       if (urlObj.hostname.includes("vimeo")) {
@@ -580,25 +655,97 @@ class UniversalVideoDetector {
         return `Vimeo - ${id}`;
       }
 
-      // Nome do arquivo
+      if (
+        urlObj.hostname.includes("bunnycdn") ||
+        urlObj.hostname.includes("mediadelivery")
+      ) {
+        const pathParts = urlObj.pathname.split("/").filter((p) => p);
+        if (pathParts.length >= 2) {
+          return `BunnyCDN - ${pathParts[pathParts.length - 1]}`;
+        }
+        return "BunnyCDN - Video";
+      }
+
+      // Rocketseat - extrai título da URL de referência se disponível
+      if (
+        urlObj.hostname.includes("rocketseat") ||
+        document.referrer.includes("rocketseat")
+      ) {
+        try {
+          const referrerUrl = document.referrer || window.location.href;
+          const lessonMatch = referrerUrl.match(/\/lesson\/([^\/\?&#]+)/);
+          if (lessonMatch && lessonMatch[1]) {
+            const lessonSlug = lessonMatch[1];
+            const lessonTitle = lessonSlug
+              .replace(/-/g, " ")
+              .replace(/\b\w/g, (l) => l.toUpperCase());
+            return `Rocketseat - ${lessonTitle}`;
+          }
+        } catch (e) {}
+      }
+
+      // Nome do arquivo com mais contexto
       const filename = urlObj.pathname.split("/").pop();
       if (filename && filename.includes(".")) {
-        return filename.replace(
-          /\.(mp4|webm|avi|mov|mkv|flv|wmv|m4v|3gp)$/i,
+        const nameWithoutExt = filename.replace(
+          /\.(mp4|webm|avi|mov|mkv|flv|wmv|m4v|3gp|m3u8|ts|mpd)$/i,
           ""
         );
+        return `${urlObj.hostname} - ${nameWithoutExt}`;
+      }
+
+      // Se não tem filename, usa path segments
+      const pathSegments = urlObj.pathname
+        .split("/")
+        .filter((s) => s && s !== "");
+      if (pathSegments.length > 0) {
+        const lastSegment = pathSegments[pathSegments.length - 1];
+        const secondLastSegment = pathSegments[pathSegments.length - 2];
+
+        if (secondLastSegment && lastSegment) {
+          return `${urlObj.hostname} - ${secondLastSegment}/${lastSegment}`;
+        } else {
+          return `${urlObj.hostname} - ${lastSegment}`;
+        }
+      }
+
+      // Inclui parâmetros de query se existirem
+      if (urlObj.search) {
+        const params = new URLSearchParams(urlObj.search);
+        const paramStr = Array.from(params.entries())
+          .slice(0, 2) // Pega apenas os 2 primeiros parâmetros
+          .map(([k, v]) => `${k}=${v.substring(0, 10)}`)
+          .join("&");
+        return `${urlObj.hostname} - ${paramStr}`;
       }
 
       return `${urlObj.hostname}${urlObj.pathname}`;
     } catch (e) {
-      return "Vídeo detectado";
+      // Se falhar, gera um título único com timestamp
+      return `Vídeo detectado - ${Date.now()}`;
     }
   }
 
   getVideoTitle(element) {
     if (!element) return "Vídeo sem título";
 
-    // Tenta várias fontes de título
+    // Primeiro tenta encontrar o título específico do vídeo baseado na sua URL
+    const videoUrl =
+      element.src || element.href || element.getAttribute("data-src");
+    if (videoUrl) {
+      const specificTitle = this.getSpecificVideoTitle(videoUrl, element);
+      if (specificTitle) {
+        return specificTitle;
+      }
+    }
+
+    // Depois tenta encontrar o título real do vídeo na página
+    const realTitle = this.findRealVideoTitle();
+    if (realTitle && realTitle !== document.title) {
+      return realTitle;
+    }
+
+    // Tenta várias fontes de título específicas do elemento
     const sources = [
       element.title,
       element.alt,
@@ -613,8 +760,19 @@ class UniversalVideoDetector {
       }
     }
 
-    // Procura por título próximo
-    const titleSelectors = [
+    // Procura por título próximo ao elemento (mais específico)
+    const parent = element.closest(
+      "[data-title], .video-container, .player-container, .media-item"
+    );
+    if (parent) {
+      const titleAttr = parent.getAttribute("data-title");
+      if (titleAttr && titleAttr.trim()) {
+        return titleAttr.trim();
+      }
+    }
+
+    // Procura por elementos de título próximos hierarquicamente
+    const nearbyTitleSelectors = [
       "h1",
       "h2",
       "h3",
@@ -626,7 +784,21 @@ class UniversalVideoDetector {
       ".player-title",
     ];
 
-    for (const selector of titleSelectors) {
+    // Primeiro tenta dentro do container pai
+    if (element.parentElement) {
+      for (const selector of nearbyTitleSelectors) {
+        const titleEl = element.parentElement.querySelector(selector);
+        if (titleEl?.textContent?.trim()) {
+          const title = titleEl.textContent.trim();
+          if (title.length > 0 && title.length < 200) {
+            return title;
+          }
+        }
+      }
+    }
+
+    // Se ainda não encontrou, procura globalmente mas com mais critério
+    for (const selector of nearbyTitleSelectors) {
       const titleEl = document.querySelector(selector);
       if (titleEl?.textContent?.trim()) {
         const title = titleEl.textContent.trim();
@@ -636,7 +808,449 @@ class UniversalVideoDetector {
       }
     }
 
-    return document.title || "Vídeo sem título";
+    // Como último recurso, usa document.title mas torna único
+    const baseTitle = document.title || "Vídeo sem título";
+
+    // Se o elemento tem src/href, adiciona uma parte da URL para tornar único
+    if (videoUrl) {
+      try {
+        const urlObj = new URL(videoUrl);
+        const filename = urlObj.pathname.split("/").pop();
+        const params = urlObj.searchParams.toString();
+
+        // Adiciona identificador único baseado na URL
+        if (filename && filename !== "") {
+          return `${baseTitle} - ${filename}`;
+        } else if (params) {
+          const shortParams = params.substring(0, 20);
+          return `${baseTitle} - ${shortParams}`;
+        } else {
+          const pathSegments = urlObj.pathname.split("/").filter((s) => s);
+          const lastSegment = pathSegments[pathSegments.length - 1];
+          if (lastSegment) {
+            return `${baseTitle} - ${lastSegment}`;
+          }
+        }
+      } catch (e) {
+        // Se falhar ao processar URL, adiciona timestamp para tornar único
+        return `${baseTitle} - ${Date.now()}`;
+      }
+    }
+
+    return baseTitle;
+  }
+
+  getSpecificVideoTitle(videoUrl, element) {
+    try {
+      // Para BunnyCDN/mediadelivery, tenta extrair ID único
+      if (
+        videoUrl.includes("mediadelivery.net") ||
+        videoUrl.includes("bunnycdn")
+      ) {
+        const urlObj = new URL(videoUrl);
+        const pathParts = urlObj.pathname.split("/").filter((p) => p);
+
+        // Tenta pegar ID do vídeo da URL
+        if (pathParts.length >= 2) {
+          const videoId = pathParts[pathParts.length - 1];
+          const libraryId = pathParts[pathParts.length - 2];
+
+          // Se estamos no Rocketseat, tenta extrair título da página atual
+          if (window.location.hostname.includes("rocketseat")) {
+            const lessonMatch = window.location.pathname.match(
+              /\/lesson\/([^\/\?&#]+)/
+            );
+            if (lessonMatch && lessonMatch[1]) {
+              const lessonSlug = lessonMatch[1];
+              const lessonTitle = lessonSlug
+                .replace(/-/g, " ")
+                .replace(/\b\w/g, (l) => l.toUpperCase());
+              return `${lessonTitle} - ${videoId.substring(0, 8)}`;
+            }
+          }
+
+          return `BunnyCDN Video - ${videoId.substring(0, 12)}`;
+        }
+      }
+
+      // Para outros vídeos, tenta extrair do contexto da página
+      if (element) {
+        // Procura por atributos específicos de vídeo
+        const videoTitle =
+          element.getAttribute("data-video-title") ||
+          element.getAttribute("data-title") ||
+          element.getAttribute("aria-label");
+
+        if (videoTitle && videoTitle.trim()) {
+          return videoTitle.trim();
+        }
+
+        // Procura por elementos próximos que podem ter o título específico
+        const container = element.closest(
+          "[data-video-title], .lesson-item, .video-item, .media-item"
+        );
+        if (container) {
+          const containerTitle =
+            container.getAttribute("data-video-title") ||
+            container
+              .querySelector(".title, .video-title, h1, h2, h3")
+              ?.textContent?.trim();
+          if (containerTitle) {
+            return containerTitle;
+          }
+        }
+      }
+
+      return null;
+    } catch (e) {
+      console.log("Erro ao extrair título específico:", e);
+      return null;
+    }
+  }
+
+  findRealVideoTitle() {
+    const hostname = window.location.hostname.toLowerCase();
+
+    // Primeiro tenta metadados Open Graph e Twitter Cards
+    const ogTitle = document.querySelector(
+      'meta[property="og:title"]'
+    )?.content;
+    const twitterTitle = document.querySelector(
+      'meta[name="twitter:title"]'
+    )?.content;
+    const ogVideoTitle = document.querySelector(
+      'meta[property="og:video:title"]'
+    )?.content;
+
+    if (ogVideoTitle && ogVideoTitle.trim()) {
+      return ogVideoTitle.trim();
+    }
+
+    if (ogTitle && ogTitle.trim() && ogTitle !== document.title) {
+      return ogTitle.trim();
+    }
+
+    if (
+      twitterTitle &&
+      twitterTitle.trim() &&
+      twitterTitle !== document.title
+    ) {
+      return twitterTitle.trim();
+    }
+
+    // YouTube
+    if (hostname.includes("youtube.com") || hostname.includes("youtu.be")) {
+      const selectors = [
+        "#title h1.ytd-video-primary-info-renderer", // Novo layout
+        ".ytd-video-primary-info-renderer .title",
+        "h1.title.style-scope.ytd-video-primary-info-renderer",
+        ".watch-main-col h1",
+        "#eow-title",
+        ".ytp-title-text",
+        "h1.ytd-watch-metadata yt-formatted-string",
+      ];
+
+      for (const selector of selectors) {
+        const el = document.querySelector(selector);
+        if (el?.textContent?.trim()) {
+          return el.textContent.trim();
+        }
+      }
+
+      // Tenta extrair do player do YouTube
+      try {
+        if (
+          window.ytplayer &&
+          window.ytplayer.config &&
+          window.ytplayer.config.args
+        ) {
+          const title = window.ytplayer.config.args.title;
+          if (title) return title;
+        }
+      } catch (e) {}
+    }
+
+    // Vimeo
+    if (hostname.includes("vimeo.com")) {
+      const selectors = [
+        ".video-title",
+        ".player_title",
+        'h1[data-test-id="video-title"]',
+        ".clip-quote-display-title",
+        ".video_title",
+      ];
+
+      for (const selector of selectors) {
+        const el = document.querySelector(selector);
+        if (el?.textContent?.trim()) {
+          return el.textContent.trim();
+        }
+      }
+    }
+
+    // Twitch
+    if (hostname.includes("twitch.tv")) {
+      const selectors = [
+        'h1[data-a-target="stream-title"]',
+        ".channel-header__title",
+        ".video-info-card__title",
+        'h2[data-a-target="stream-title"]',
+      ];
+
+      for (const selector of selectors) {
+        const el = document.querySelector(selector);
+        if (el?.textContent?.trim()) {
+          return el.textContent.trim();
+        }
+      }
+    }
+
+    // TikTok
+    if (hostname.includes("tiktok.com")) {
+      const selectors = [
+        '[data-e2e="browse-video-desc"]',
+        ".video-meta-title",
+        ".tt-video-meta-caption",
+        '[data-e2e="video-desc"]',
+      ];
+
+      for (const selector of selectors) {
+        const el = document.querySelector(selector);
+        if (el?.textContent?.trim()) {
+          return el.textContent.trim();
+        }
+      }
+    }
+
+    // Instagram
+    if (hostname.includes("instagram.com")) {
+      const selectors = [
+        "article h1",
+        ".media-caption",
+        '[data-testid="caption-text"]',
+        'meta[property="og:description"]',
+      ];
+
+      for (const selector of selectors) {
+        const el = document.querySelector(selector);
+        if (el?.textContent?.trim() || el?.content?.trim()) {
+          return (el.textContent || el.content).trim();
+        }
+      }
+    }
+
+    // Facebook
+    if (hostname.includes("facebook.com")) {
+      const selectors = [
+        '[data-testid="post_message"]',
+        ".userContent",
+        ".video-title",
+        '[data-ad-preview="message"]',
+      ];
+
+      for (const selector of selectors) {
+        const el = document.querySelector(selector);
+        if (el?.textContent?.trim()) {
+          return el.textContent.trim();
+        }
+      }
+    }
+
+    // Dailymotion
+    if (hostname.includes("dailymotion.com")) {
+      const selectors = [
+        ".video-title",
+        ".VideoTitle__title",
+        "h1.title",
+        ".player_box_title",
+      ];
+
+      for (const selector of selectors) {
+        const el = document.querySelector(selector);
+        if (el?.textContent?.trim()) {
+          return el.textContent.trim();
+        }
+      }
+    }
+
+    // Sites educacionais comuns
+    if (hostname.includes("udemy.com")) {
+      const selectors = [
+        '[data-purpose="video-curriculum-item-title"]',
+        ".curriculum-item-title",
+        ".lecture-title",
+        ".curriculum-item-title--curriculum-item--title",
+        'h1[data-purpose="course-header-title"]',
+      ];
+
+      for (const selector of selectors) {
+        const el = document.querySelector(selector);
+        if (el?.textContent?.trim()) {
+          return el.textContent.trim();
+        }
+      }
+    }
+
+    if (hostname.includes("coursera.org")) {
+      const selectors = [
+        ".video-title",
+        ".item-title",
+        ".lecture-title",
+        'h1[data-e2e="lesson-title"]',
+      ];
+
+      for (const selector of selectors) {
+        const el = document.querySelector(selector);
+        if (el?.textContent?.trim()) {
+          return el.textContent.trim();
+        }
+      }
+    }
+
+    // Rocketseat (já que você mencionou antes)
+    if (
+      hostname.includes("rocketseat.com") ||
+      hostname.includes("app.rocketseat.com")
+    ) {
+      const selectors = [
+        ".lesson-title",
+        ".video-title",
+        "h1.title",
+        '[data-testid="lesson-title"]',
+        ".content-title",
+        ".lesson-header__title",
+        'h1[class*="lesson"]',
+        ".lesson-content h1",
+        ".lesson-header h1",
+        "[data-lesson-title]",
+      ];
+
+      for (const selector of selectors) {
+        const el = document.querySelector(selector);
+        if (el?.textContent?.trim()) {
+          return el.textContent.trim();
+        }
+      }
+
+      // Se não encontrou pelo DOM, tenta extrair da URL
+      try {
+        const path = window.location.pathname;
+        const lessonMatch = path.match(/\/lesson\/([^\/]+)/);
+        if (lessonMatch && lessonMatch[1]) {
+          // Converte o slug da URL em título legível
+          const lessonSlug = lessonMatch[1];
+          const lessonTitle = lessonSlug
+            .replace(/-/g, " ")
+            .replace(/\b\w/g, (l) => l.toUpperCase());
+          return `Rocketseat - ${lessonTitle}`;
+        }
+
+        // Também tenta extrair do hash se existir
+        const hash = window.location.hash;
+        if (hash.includes("lesson")) {
+          const hashMatch = hash.match(/lesson[\/=]([^\/&#]+)/);
+          if (hashMatch && hashMatch[1]) {
+            const lessonSlug = hashMatch[1];
+            const lessonTitle = lessonSlug
+              .replace(/-/g, " ")
+              .replace(/\b\w/g, (l) => l.toUpperCase());
+            return `Rocketseat - ${lessonTitle}`;
+          }
+        }
+      } catch (e) {
+        console.log("Erro ao extrair título do Rocketseat da URL:", e);
+      }
+    }
+
+    // Streaming e outros sites de vídeo
+    if (hostname.includes("netflix.com")) {
+      const selectors = [
+        ".video-title",
+        ".previewModal--player-titleTreatmentWrapper h3",
+        ".video-metadata h3",
+      ];
+
+      for (const selector of selectors) {
+        const el = document.querySelector(selector);
+        if (el?.textContent?.trim()) {
+          return el.textContent.trim();
+        }
+      }
+    }
+
+    if (hostname.includes("primevideo.com") || hostname.includes("amazon.")) {
+      const selectors = [
+        '[data-testid="title"]',
+        ".title",
+        'h1[data-automation-id="title"]',
+      ];
+
+      for (const selector of selectors) {
+        const el = document.querySelector(selector);
+        if (el?.textContent?.trim()) {
+          return el.textContent.trim();
+        }
+      }
+    }
+
+    // Seletores genéricos para outros sites
+    const genericSelectors = [
+      "h1.video-title",
+      ".video-title h1",
+      ".player-title",
+      ".media-title",
+      ".content-title",
+      'h1[class*="title"]',
+      'h2[class*="title"]',
+      "[data-title]",
+      '.title[class*="video"]',
+      ".lesson-title",
+      ".episode-title",
+      ".course-title",
+      ".stream-title",
+      ".player-info h1",
+      ".video-header h1",
+      ".video-description h1",
+      ".video-info h1",
+      ".media-header h1",
+    ];
+
+    for (const selector of genericSelectors) {
+      const el = document.querySelector(selector);
+      if (el?.textContent?.trim()) {
+        const title = el.textContent.trim();
+        // Filtra títulos muito genéricos ou iguais ao document.title
+        if (
+          title.length > 5 &&
+          title.length < 300 &&
+          !title.toLowerCase().includes("undefined") &&
+          !title.toLowerCase().includes("null") &&
+          !title.toLowerCase().includes("loading") &&
+          !title.toLowerCase().includes("untitled") &&
+          title !== document.title
+        ) {
+          return title;
+        }
+      }
+    }
+
+    // Última tentativa: procura em JSON-LD structured data
+    try {
+      const jsonLdScripts = document.querySelectorAll(
+        'script[type="application/ld+json"]'
+      );
+      for (const script of jsonLdScripts) {
+        const data = JSON.parse(script.textContent);
+        if (data["@type"] === "VideoObject" && data.name) {
+          return data.name;
+        }
+        if (data.video && data.video.name) {
+          return data.video.name;
+        }
+      }
+    } catch (e) {}
+
+    return null; // Não encontrou título específico
   }
 
   processDetectedVideos(videos) {
@@ -654,7 +1268,7 @@ class UniversalVideoDetector {
     const seenUrls = new Set();
 
     sortedVideos.forEach((video) => {
-      if (!seenUrls.has(video.url)) {
+      if (!seenUrls.has(video.url) && !this.dismissedVideos.has(video.url)) {
         seenUrls.add(video.url);
         uniqueVideos.push(video);
         this.detectedVideos.add(video.url);
@@ -689,22 +1303,36 @@ class UniversalVideoDetector {
         font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
         font-size: 14px;
         max-width: 350px;
-        cursor: pointer;
         transition: all 0.3s ease;
         border: 2px solid rgba(255,255,255,0.2);
         backdrop-filter: blur(10px);
-      " onmouseover="this.style.transform='scale(1.05)'" onmouseout="this.style.transform='scale(1)'">
-        <div style="display: flex; align-items: center; gap: 12px;">
+      " id="video-notification-card">
+        <div style="display: flex; align-items: center; gap: 12px; position: relative;">
           <span style="font-size: 24px; animation: pulse 2s infinite;">🎬</span>
-          <div>
-            <div style="font-weight: bold; font-size: 16px;">${
-              videos.length
-            } vídeo(s) detectado(s)!</div>
-            <div style="font-size: 12px; opacity: 0.9; margin-top: 4px;">
-              ${videos.map((v) => v.source).join(", ")}<br>
-              🚀 Clique para baixar agora!
-            </div>
+          <div style="flex: 1; cursor: pointer;" id="notification-content">
+            <div style="font-weight: bold; font-size: 16px;">Download Video</div>
           </div>
+          <button style="
+            position: absolute;
+            top: -8px;
+            right: -8px;
+            background: rgba(255,255,255,0.2);
+            border: none;
+            border-radius: 50%;
+            width: 24px;
+            height: 24px;
+            color: white;
+            font-size: 14px;
+            font-weight: bold;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: background 0.2s ease;
+            backdrop-filter: blur(5px);
+          " id="close-notification" 
+            onmouseover="this.style.background='rgba(255,255,255,0.3)'" 
+            onmouseout="this.style.background='rgba(255,255,255,0.2)'">×</button>
         </div>
       </div>
       <style>
@@ -712,21 +1340,76 @@ class UniversalVideoDetector {
           0%, 100% { transform: scale(1); }
           50% { transform: scale(1.1); }
         }
+        #notification-content:hover {
+          transform: scale(1.02);
+        }
       </style>
     `;
 
     document.body.appendChild(overlay);
 
     // Auto-remove após 8 segundos
-    setTimeout(() => {
+    const autoRemoveTimeout = setTimeout(() => {
       if (overlay.parentNode) overlay.remove();
     }, 8000);
 
-    // Click para enviar o primeiro vídeo
-    overlay.addEventListener("click", () => {
+    // Botão de fechar
+    const closeBtn = overlay.querySelector("#close-notification");
+    closeBtn.addEventListener("click", (e) => {
+      e.stopPropagation(); // Evita que o clique dispare o download
+      clearTimeout(autoRemoveTimeout);
+
+      // Adiciona todos os vídeos desta notificação à lista de dispensados
+      videos.forEach((video) => {
+        this.dismissedVideos.add(video.url);
+      });
+
+      console.log("🚫 Notificação dispensada pelo usuário");
+      overlay.remove();
+
+      // Mostra confirmação rápida
+      this.showDismissConfirmation(videos.length);
+    });
+
+    // Clique na área de conteúdo para baixar
+    const content = overlay.querySelector("#notification-content");
+    content.addEventListener("click", (e) => {
+      e.stopPropagation();
+      clearTimeout(autoRemoveTimeout);
       this.sendToDownloader(videos[0]);
       overlay.remove();
     });
+  }
+
+  showDismissConfirmation(count) {
+    const confirmation = document.createElement("div");
+    confirmation.innerHTML = `
+      <div style="
+        position: fixed;
+        top: 20px;
+        right: 20px;
+        background: rgba(0,0,0,0.8);
+        color: white;
+        padding: 12px 16px;
+        border-radius: 8px;
+        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+        font-size: 14px;
+        z-index: 2147483647;
+        backdrop-filter: blur(10px);
+        border: 1px solid rgba(255,255,255,0.2);
+      ">
+        ✅ Notificação dispensada (${count} vídeo${count > 1 ? "s" : ""})
+      </div>
+    `;
+
+    document.body.appendChild(confirmation);
+
+    // Remove após 2 segundos
+    setTimeout(() => {
+      if (confirmation.parentNode) {
+        confirmation.remove();
+      }
+    }, 2000);
   }
 
   notifyExtension(videos) {
@@ -757,13 +1440,139 @@ class UniversalVideoDetector {
 
   async sendViaHTTP(video) {
     try {
+      // Coleta headers completos como no popup.js
+      let allHeaders = {};
+
+      // 1. Tenta buscar headers do webRequest
+      try {
+        const requestKey = `request_${video.url}`;
+        const result = await chrome.storage.local.get([requestKey]);
+        if (result[requestKey] && result[requestKey].headers) {
+          allHeaders = result[requestKey].headers;
+          console.log(
+            "[NotificationIDM] Headers de requisição encontrados:",
+            allHeaders
+          );
+        }
+      } catch (e) {}
+
+      // 2. Fallback: buscar headers do userscript/XHR
+      if (Object.keys(allHeaders).length === 0) {
+        try {
+          const key = `headers_${video.url}`;
+          const result = await chrome.storage.local.get([key]);
+          if (result[key] && Object.keys(result[key]).length > 0) {
+            allHeaders = result[key];
+          }
+        } catch (e) {}
+      }
+
+      // 3. Adiciona cookies da página atual
+      try {
+        const cookies = await chrome.cookies.getAll({
+          url: window.location.href,
+        });
+        if (cookies.length > 0) {
+          allHeaders["Cookie"] = cookies
+            .map((c) => `${c.name}=${c.value}`)
+            .join("; ");
+        }
+      } catch (e) {}
+
+      // 4. Garante Referer e User-Agent
+      if (!allHeaders["Referer"]) allHeaders["Referer"] = window.location.href;
+      if (!allHeaders["User-Agent"])
+        allHeaders["User-Agent"] = navigator.userAgent;
+
+      // 5. Melhora o título do vídeo baseado na URL específica e contexto
+      let improvedTitle = video.title;
+
+      // Para BunnyCDN no Rocketseat, tenta extrair título da lição atual
+      if (
+        video.url.includes("mediadelivery.net") &&
+        window.location.hostname.includes("rocketseat")
+      ) {
+        try {
+          const lessonMatch = window.location.pathname.match(
+            /\/lesson\/([^\/\?&#]+)/
+          );
+          if (lessonMatch && lessonMatch[1]) {
+            const lessonSlug = lessonMatch[1];
+            const lessonTitle = lessonSlug
+              .replace(/-/g, " ")
+              .replace(/\b\w/g, (l) => l.toUpperCase());
+
+            // Adiciona ID do vídeo para diferenciá-lo
+            const videoUrlObj = new URL(video.url);
+            const pathParts = videoUrlObj.pathname.split("/").filter((p) => p);
+            const videoId = pathParts[pathParts.length - 1];
+            const shortId = videoId
+              ? videoId.substring(0, 8)
+              : Math.random().toString(36).substring(2, 8);
+
+            improvedTitle = `${lessonTitle} - ${shortId}`;
+            console.log(
+              "[NotificationIDM] Título específico para vídeo:",
+              improvedTitle
+            );
+          }
+        } catch (e) {}
+      }
+
+      // Para outros sites, se o Referer contém informações úteis
+      else if (allHeaders["Referer"]) {
+        try {
+          const refererUrl = new URL(allHeaders["Referer"]);
+
+          // Rocketseat genérico
+          if (refererUrl.hostname.includes("rocketseat")) {
+            const lessonMatch = refererUrl.pathname.match(
+              /\/lesson\/([^\/\?&#]+)/
+            );
+            if (lessonMatch && lessonMatch[1]) {
+              const lessonSlug = lessonMatch[1];
+              const lessonTitle = lessonSlug
+                .replace(/-/g, " ")
+                .replace(/\b\w/g, (l) => l.toUpperCase());
+
+              // Se já não começar com o nome da lição, adiciona
+              if (
+                !improvedTitle.toLowerCase().includes(lessonTitle.toLowerCase())
+              ) {
+                improvedTitle = `${lessonTitle}`;
+              }
+            }
+          }
+
+          // Outros sites educacionais
+          else if (
+            refererUrl.hostname.includes("udemy") ||
+            refererUrl.hostname.includes("coursera")
+          ) {
+            const pathSegments = refererUrl.pathname
+              .split("/")
+              .filter((s) => s);
+            if (pathSegments.length > 2) {
+              const courseSection = pathSegments[pathSegments.length - 1];
+              const readableSection = courseSection
+                .replace(/-/g, " ")
+                .replace(/\b\w/g, (l) => l.toUpperCase());
+              improvedTitle = `${readableSection}`;
+            }
+          }
+        } catch (e) {}
+      }
+
+      console.log("[NotificationIDM] Enviando headers:", allHeaders);
+
       const response = await fetch("http://localhost:8765/download", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           url: video.url,
-          title: video.title,
+          title: improvedTitle, // Usa o título melhorado
           source: video.source || "browser_extension",
+          headers: allHeaders, // Agora inclui headers completos!
         }),
         signal: AbortSignal.timeout(3000), // 3 segundo timeout
       });
@@ -866,6 +1675,9 @@ URL: ${video.url}
     const urlCheck = () => {
       if (window.location.href !== currentUrl) {
         currentUrl = window.location.href;
+        // Limpa vídeos dispensados quando a URL muda
+        this.dismissedVideos.clear();
+        console.log("🔄 URL mudou - limpando vídeos dispensados");
         setTimeout(() => this.scanForVideos(), 3000);
       }
     };
@@ -873,6 +1685,8 @@ URL: ${video.url}
     setInterval(urlCheck, 1000);
 
     window.addEventListener("popstate", () => {
+      // Limpa vídeos dispensados no botão voltar/avançar
+      this.dismissedVideos.clear();
       setTimeout(() => this.scanForVideos(), 3000);
     });
   }

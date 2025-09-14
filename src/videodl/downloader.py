@@ -274,7 +274,8 @@ class VideoDownloader:
                  ensure_audio: bool = True,
                  selected_items: Optional[List[int]] = None,
                  progress_cb: Optional[Callable[[Dict[str, Any]], None]] = None,
-                 extra_headers: Optional[dict] = None):
+                 extra_headers: Optional[dict] = None,
+                 custom_filename: Optional[str] = None):
         """Baixa vídeo(s).
         playlist_mode: se True não força noplaylist e usa template indexado.
         write_thumbnail: salva thumbnail (se disponível) convertida para jpg.
@@ -349,10 +350,25 @@ class VideoDownloader:
             postprocessors.append({'key': 'EmbedThumbnail'})
             postprocessors.append({'key': 'FFmpegMetadata'})
             postprocessors.append({'key': 'FFmpegThumbnailsConvertor', 'format': 'jpg'})
-        outtmpl = f'{output_dir}/%(title)s.%(ext)s'
+        # Template de saída - usa título personalizado se fornecido
+        if custom_filename:
+            # Limpa caracteres inválidos do nome do arquivo
+            safe_filename = "".join(c for c in custom_filename if c.isalnum() or c in (' ', '-', '_', '.')).rstrip()
+            if not safe_filename:
+                safe_filename = "video_download"
+            outtmpl = f'{output_dir}/{safe_filename}.%(ext)s'
+        else:
+            outtmpl = f'{output_dir}/%(title)s.%(ext)s'
+            
         if playlist_mode:
             # prefixo com índice para evitar overwrite e manter ordem
-            outtmpl = f'{output_dir}/%(playlist_index)03d - %(title)s.%(ext)s'
+            if custom_filename:
+                safe_filename = "".join(c for c in custom_filename if c.isalnum() or c in (' ', '-', '_', '.')).rstrip()
+                if not safe_filename:
+                    safe_filename = "video_download"
+                outtmpl = f'{output_dir}/%(playlist_index)03d - {safe_filename}.%(ext)s'
+            else:
+                outtmpl = f'{output_dir}/%(playlist_index)03d - %(title)s.%(ext)s'
 
         ydl_opts = {
             'format': ydl_format,

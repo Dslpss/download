@@ -11,8 +11,16 @@ import time
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import urllib.parse
 
-from .downloader import VideoDownloader, FormatInfo, DownloadCancelled
-from . import downloader as downloader_module
+# Import absoluto para evitar problemas no PyInstaller
+try:
+    from videodl.downloader import VideoDownloader, FormatInfo, DownloadCancelled
+    from videodl import downloader as downloader_module
+    from videodl.simple_idm_window import SimpleIDMWindow
+except ImportError:
+    # Fallback para desenvolvimento local
+    from downloader import VideoDownloader, FormatInfo, DownloadCancelled
+    import downloader as downloader_module
+    from simple_idm_window import SimpleIDMWindow
 
 
 # Verifica se pyperclip está disponível para monitoramento de clipboard
@@ -21,7 +29,7 @@ try:
     CLIPBOARD_AVAILABLE = importlib.util.find_spec("pyperclip") is not None
 except Exception:
     CLIPBOARD_AVAILABLE = False
-    print("pyperclip não instalado - funcionalidade de clipboard desabilitada")
+    print("pyperclip não disponível - funcionalidade de clipboard desabilitada")
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -459,7 +467,22 @@ class App(tk.Tk):
                     global_percent = percent_item
                 speed = d.get('speed')
                 eta = d.get('eta')
+                
+                # Atualiza interface principal
                 self.after(0, lambda p=global_percent, s=speed, e=eta, pi=playlist_index, pc=playlist_count, pi_pct=percent_item: self._update_progress(p, s, e, pi, pc, pi_pct))
+                
+                # Atualiza janela IDM se existir
+                if hasattr(self, '_idm_window') and self._idm_window:
+                    # Formata informações para a janela IDM
+                    speed_text = f"{speed/1024/1024:.1f} MB/s" if speed else "Calculando..."
+                    eta_text = f"{eta}s restantes" if eta else "Calculando tempo..."
+                    size_text = f"{downloaded/1024/1024:.1f} MB / {total/1024/1024:.1f} MB" if total else f"{downloaded/1024/1024:.1f} MB"
+                    
+                    status_text = f"📥 Baixando... {global_percent:.1f}%"
+                    details_text = f"🚀 {speed_text} | ⏱️ {eta_text} | 💾 {size_text}"
+                    
+                    self.after(0, lambda: self._idm_window.update_progress(global_percent, status_text, details_text))
+                    
             elif status == 'finished':
                 # ao terminar um item, atualizar para 100% daquele item e refletir agregado
                 if self._playlist_total and self._current_index:
@@ -478,6 +501,11 @@ class App(tk.Tk):
                 selected_items = self.selected_video_indices if self.selected_video_indices else None
                 # Headers HTTP completos se vieram do navegador
                 extra_headers = getattr(self, '_last_headers', None)
+                # Título personalizado se fornecido
+                custom_filename = getattr(self, '_custom_filename', None)
+                if custom_filename:
+                    self.log(f"📝 Usando título personalizado: {custom_filename}")
+                
                 self.downloader.download(
                     url, outdir, fmt_id, only_audio,
                     playlist_mode=playlist_mode,
@@ -486,19 +514,39 @@ class App(tk.Tk):
                     ensure_audio=True,
                     selected_items=selected_items,
                     progress_cb=progress_hook,
-                    extra_headers=extra_headers
+                    extra_headers=extra_headers,
+                    custom_filename=custom_filename
                 )
                 self.after(0, lambda: self.status_var.set("Concluído"))
                 self.after(0, lambda: self.log("Concluído"))
+                
+                # Finaliza janela IDM se existir
+                if hasattr(self, '_idm_window') and self._idm_window:
+                    filename = custom_filename or "Arquivo baixado"
+                    self.after(0, lambda: self._idm_window.finish_download(True, f"Salvo como: {filename}"))
+                    
             except DownloadCancelled:
                 self.after(0, lambda: self.status_var.set("Cancelado"))
                 self.after(0, lambda: self.log("Cancelado"))
+                
+                # Finaliza janela IDM com erro se existir
+                if hasattr(self, '_idm_window') and self._idm_window:
+                    self.after(0, lambda: self._idm_window.finish_download(False, "Download cancelado pelo usuário"))
+                    
             except Exception as e:
                 self.after(0, lambda: self.status_var.set("Erro"))
                 self.after(0, lambda: self.log(f"Erro: {e}"))
+                
+                # Finaliza janela IDM com erro se existir
+                if hasattr(self, '_idm_window') and self._idm_window:
+                    self.after(0, lambda: self._idm_window.finish_download(False, f"Erro: {str(e)}"))
+                    
             finally:
                 self.after(0, lambda: self.download_btn.config(state='normal'))
                 self.after(0, lambda: self.cancel_btn.config(state='disabled'))
+                # Limpa referência da janela IDM
+                if hasattr(self, '_idm_window'):
+                    self._idm_window = None
         threading.Thread(target=worker, daemon=True).start()
 
     def _update_progress(self, global_percent, speed, eta, playlist_index=None, playlist_count=None, item_percent=None):
@@ -592,9 +640,36 @@ class App(tk.Tk):
                     f"Detectei uma URL de vídeo!\n\nQuer que eu analise automaticamente para ver os formatos disponíveis?",
                     icon='question'
                 )
-                if result:
-                    self.on_list_formats()
+            if result:
+                self.on_list_formats()
 
+    def _start_auto_download(self):
+        """Inicia análise e download automático (estilo IDM)."""
+        self.log("🚀 Iniciando download automático estilo IDM...")
+        
+        # Primeiro analisa o vídeo
+        self.on_list_formats()
+        
+        # Agenda o download para depois da análise (aguarda 3 segundos)
+        self.after(3000, self._try_auto_download)
+    
+    def _try_auto_download(self):
+        """Tenta iniciar download automático se os formatos estiverem carregados."""
+        if self.formats:
+            self.log("✅ Formatos carregados, iniciando download automático...")
+            # Seleciona automaticamente o melhor formato (primeiro da lista)
+            if self.formats:
+                self.selected_format = self.formats[0].itag
+                self.log(f"📱 Formato selecionado automaticamente: {self.formats[0].itag} ({self.formats[0].resolution})")
+                # Inicia o download
+                self.on_download()
+            else:
+                self.log("⚠️ Nenhum formato encontrado para download automático")
+        else:
+            self.log("⏳ Aguardando formatos carregarem...")
+            # Tenta novamente em 1 segundo
+            self.after(1000, self._try_auto_download)
+    
     def _is_video_url(self, url: str) -> bool:
         """Verifica se a URL é de um site de vídeo suportado."""
         video_patterns = [
@@ -663,8 +738,10 @@ Funciona em: YouTube, Vimeo, etc.
         messagebox.showinfo("🌐 Como usar integração com navegador", instructions)
 
     def _handle_browser_request(self, url: str, title: str, source: str, headers: dict = None, referer: str = "", user_agent: str = "", cookies: str = ""):
-        """Processa requisição vinda do navegador."""
+        """Processa requisição vinda do navegador - Abre janela IDM-like."""
         self.log(f"🌐 Vídeo detectado pelo navegador: {title[:50]}...")
+        self.log(f"🔗 URL: {url}")
+        self.log(f"📡 Headers: {len(headers or {})} headers recebidos")
 
         # Salva headers extras para uso no download
         self._last_headers = headers or {}
@@ -672,22 +749,51 @@ Funciona em: YouTube, Vimeo, etc.
         self._last_user_agent = user_agent
         self._last_cookies = cookies
 
-        # Foca a janela
+        # Foca a janela principal
         self.lift()
         self.focus_force()
 
-        # Preenche a URL
-        self.url_var.set(url)
-
-        # Pergunta se deve analisar automaticamente
-        result = messagebox.askyesno(
-            "🎬 Vídeo detectado pelo navegador!",
-            f"Título: {title}\n\nQuer analisar este vídeo automaticamente?",
-            icon='question'
-        )
-
-        if result:
-            self.on_list_formats()
+        # Abre janela IDM-like simples no thread principal
+        try:
+            self.log("🔧 Abrindo janela IDM-like...")
+            
+            # Cria e mostra a janela IDM
+            idm_window = SimpleIDMWindow(self, url, title, headers)
+            self.log("✅ Janela IDM criada, aguardando usuário...")
+            
+            # Aguarda resposta do usuário
+            result, custom_title = idm_window.show()
+            
+            if result:
+                self.log("✅ Usuário confirmou download!")
+                # Usa título personalizado se fornecido
+                if custom_title and custom_title.strip():
+                    self.log(f"📝 Título personalizado: {custom_title}")
+                    # Salva o título personalizado para usar no download
+                    self._custom_filename = custom_title.strip()
+                
+                # Salva referência da janela IDM para atualizar progresso
+                self._idm_window = idm_window
+                
+                self.url_var.set(url)
+                # Agenda análise E download automático
+                self.after(100, self._start_auto_download)
+            else:
+                self.log("❌ Usuário cancelou download")
+                
+        except Exception as e:
+            import traceback
+            self.log(f"❌ Erro na janela IDM: {e}")
+            self.log(f"🔍 Traceback: {traceback.format_exc()}")
+            # Fallback
+            result = messagebox.askyesno(
+                "🎬 Vídeo detectado!",
+                f"Título: {title}\n\nQuer baixar este vídeo?",
+                icon='question'
+            )
+            if result:
+                self.url_var.set(url)
+                self.on_list_formats()
 
     def on_clipboard_toggle(self):
         """Liga/desliga monitoramento de clipboard."""
