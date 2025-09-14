@@ -6,6 +6,29 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   let currentVideos = [];
 
+  // Verifica se content script está disponível na aba
+  async function isContentScriptAvailable(tabId) {
+    return new Promise((resolve) => {
+      try {
+        chrome.tabs.sendMessage(tabId, { type: "ping" }, (response) => {
+          if (chrome.runtime.lastError) {
+            console.log(
+              "[PopupIDM] Content script não disponível:",
+              chrome.runtime.lastError.message
+            );
+            resolve(false);
+          } else {
+            console.log("[PopupIDM] Content script disponível");
+            resolve(true);
+          }
+        });
+      } catch (error) {
+        console.log("[PopupIDM] Erro ao verificar content script:", error);
+        resolve(false);
+      }
+    });
+  }
+
   // Carrega vídeos detectados
   async function loadVideos() {
     try {
@@ -21,8 +44,55 @@ document.addEventListener("DOMContentLoaded", async () => {
       const videos = result[`videos_${tab.id}`] || [];
       const pageInfo = result[`page_${tab.id}`] || {};
 
-      currentVideos = videos;
-      displayVideos(videos, pageInfo);
+      // Carrega URLs universais (video_url_*) e Udemy (udemy_video_*)
+      let universalVideos = [];
+      let udemyVideos = [];
+      let debugHtml = "";
+      const allItems = await chrome.storage.local.get(null);
+      // UNIVERSAL: pega as últimas 10 video_url_*
+      universalVideos = Object.keys(allItems)
+        .filter((key) => key.startsWith("video_url_"))
+        .map((key) => ({ ...allItems[key], id: key }))
+        .sort((a, b) => b.timestamp - a.timestamp)
+        .slice(0, 10);
+
+      // UDEMY: pega as últimas 10 udemy_video_*, só .m3u8
+      udemyVideos = Object.keys(allItems)
+        .filter((key) => key.startsWith("udemy_video_"))
+        .map((key) => ({ ...allItems[key], id: key }))
+        .filter((v) => v.url && v.url.includes(".m3u8"))
+        .sort((a, b) => b.timestamp - a.timestamp)
+        .slice(0, 10);
+
+      // DEBUG: Mostra todas as chaves udemy_video_* e video_url_* encontradas
+      const allDebug = Object.keys(allItems)
+        .filter(
+          (key) =>
+            key.startsWith("udemy_video_") || key.startsWith("video_url_")
+        )
+        .map((key) => ({ ...allItems[key], id: key }))
+        .sort((a, b) => b.timestamp - a.timestamp)
+        .slice(0, 20);
+      debugHtml = "";
+
+      // Adiciona as URLs universais e Udemy à lista principal
+      const combinedVideos = [
+        ...videos,
+        ...universalVideos.map((v) => ({
+          url: v.url,
+          title: v.title || "Vídeo Interceptado (Universal)",
+          source: v.source,
+          type: "universal_intercepted",
+        })),
+        ...udemyVideos.map((v) => ({
+          url: v.url,
+          title: v.title || "Vídeo Udemy Interceptado (.m3u8)",
+          source: v.source,
+          type: "udemy_intercepted",
+        })),
+      ];
+      currentVideos = combinedVideos;
+      displayVideos(combinedVideos, pageInfo, debugHtml);
     } catch (error) {
       console.error("Erro ao carregar vídeos:", error);
       videoList.innerHTML =
@@ -30,9 +100,13 @@ document.addEventListener("DOMContentLoaded", async () => {
     }
   }
 
-  function displayVideos(videos, pageInfo) {
+  function displayVideos(videos, pageInfo, udemyDebugHtml = "") {
+    let html = "";
+    if (udemyDebugHtml) {
+      html += udemyDebugHtml;
+    }
     if (videos.length === 0) {
-      videoList.innerHTML = `
+      html += `
         <div class="no-videos">
           <div style="font-size: 24px; margin-bottom: 8px;">🔍</div>
           <div>Nenhum vídeo detectado</div>
@@ -42,6 +116,7 @@ document.addEventListener("DOMContentLoaded", async () => {
           </div>
         </div>
       `;
+      videoList.innerHTML = html;
       return;
     }
 
@@ -63,13 +138,30 @@ document.addEventListener("DOMContentLoaded", async () => {
       })
       .join("");
 
-    videoList.innerHTML = videosHTML;
+    html += videosHTML;
+    videoList.innerHTML = html;
 
     // Adiciona event listeners aos vídeos
     document.querySelectorAll(".video-item").forEach((item) => {
-      item.addEventListener("click", () => {
-        const index = parseInt(item.dataset.index);
-        downloadVideo(videos[index]);
+      item.addEventListener("click", async () => {
+        try {
+          const index = parseInt(item.dataset.index);
+          console.log(`[POPUP] Clique no vídeo ${index}:`, videos[index]);
+          showMessage(
+            `🎬 Iniciando download: ${videos[index].title.substring(0, 30)}...`
+          );
+
+          // Log explícito antes de chamar downloadVideo
+          console.log(
+            `[POPUP] Chamando downloadVideo para:`,
+            videos[index].url
+          );
+          await downloadVideo(videos[index]);
+          console.log(`[POPUP] downloadVideo completou`);
+        } catch (error) {
+          console.error(`[POPUP] Erro no card click:`, error);
+          showMessage(`❌ Erro: ${error.message}`);
+        }
       });
     });
   }
@@ -79,6 +171,8 @@ document.addEventListener("DOMContentLoaded", async () => {
       video_element: "🎥 Elemento Video",
       page_url: "🌐 URL da Página",
       iframe: "📦 iframe",
+      udemy_intercepted: "🎯 Vídeo Udemy Interceptado",
+      universal_intercepted: "🎯 Vídeo Interceptado (Universal)",
     };
     return types[type] || "❓ Desconhecido";
   }
@@ -89,7 +183,40 @@ document.addEventListener("DOMContentLoaded", async () => {
     return div.innerHTML;
   }
 
+  async function checkAppStatus() {
+    try {
+      const r = await fetch("http://localhost:8765/status", {
+        method: "GET",
+        cache: "no-store",
+      });
+      if (!r.ok) return false;
+      const data = await r.json();
+      return data.status === "running";
+    } catch (e) {
+      return false;
+    }
+  }
+
+  async function ensureAppReady() {
+    const ok = await checkAppStatus();
+    if (!ok) {
+      showMessage("⚠️ App não responde.");
+      openAppBtn.classList.add("pulse");
+      openAppBtn.textContent = "🟡 Abrir App antes";
+      return false;
+    }
+    return true;
+  }
+
   async function downloadVideo(video) {
+    console.log(`[POPUP] downloadVideo chamado para:`, video.url);
+    showMessage(`🔍 Verificando se app está rodando...`);
+
+    if (!(await ensureAppReady())) return; // novo
+
+    showMessage(`✅ App OK! Enviando vídeo...`);
+    console.log(`[POPUP] App responde, prosseguindo com download`);
+
     try {
       const [tab] = await chrome.tabs.query({
         active: true,
@@ -224,19 +351,44 @@ document.addEventListener("DOMContentLoaded", async () => {
   }
 
   async function sendToApp(video, allHeaders = {}) {
+    console.log(`[POPUP] sendToApp chamado para:`, video.url);
+    console.log(`[POPUP] Headers para enviar:`, allHeaders);
+
     try {
+      console.log(`[POPUP] Fazendo POST para http://localhost:8765/download`);
+
+      // Para vídeos interceptados da Udemy, adiciona informações especiais
+      const payload = {
+        url: video.url,
+        title: video.title,
+        source: "browser_extension",
+        headers: allHeaders,
+      };
+
+      if (video.type === "udemy_intercepted") {
+        payload.udemy_intercepted = true;
+        payload.direct_video_url = true;
+        payload.original_source = video.source;
+        console.log(
+          "[POPUP] Enviando URL direta interceptada da Udemy:",
+          video.url
+        );
+      }
+
       const response = await fetch("http://localhost:8765/download", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          url: video.url,
-          title: video.title,
-          source: "browser_extension",
-          headers: allHeaders,
-        }),
+        body: JSON.stringify(payload),
       });
 
-      return response.ok;
+      console.log(
+        `[POPUP] Resposta recebida:`,
+        response.status,
+        response.statusText
+      );
+      const isOk = response.ok;
+      console.log(`[POPUP] response.ok =`, isOk);
+      return isOk;
     } catch (error) {
       return false;
     }
@@ -302,10 +454,62 @@ document.addEventListener("DOMContentLoaded", async () => {
         active: true,
         currentWindow: true,
       });
-      chrome.tabs.sendMessage(tab.id, { type: "force_scan" });
-      setTimeout(loadVideos, 1000);
+
+      if (!tab || !tab.id) {
+        console.error("[PopupIDM] Nenhuma aba ativa encontrada");
+        return;
+      }
+
+      // Verifica se é uma URL válida para content scripts
+      if (
+        tab.url.startsWith("chrome://") ||
+        tab.url.startsWith("chrome-extension://") ||
+        tab.url.startsWith("moz-extension://")
+      ) {
+        console.log("[PopupIDM] URL não suporta content scripts:", tab.url);
+        videoList.innerHTML = `
+          <div class="no-videos">
+            <div style="font-size: 24px; margin-bottom: 8px;">⚠️</div>
+            <div>Esta página não suporta detecção de vídeos</div>
+            <div style="margin-top: 8px; font-size: 12px;">
+              Navegue para uma página web normal<br>
+              (YouTube, Vimeo, etc.)
+            </div>
+          </div>
+        `;
+        return;
+      }
+
+      console.log(
+        "[PopupIDM] Verificando se content script está disponível..."
+      );
+      const isAvailable = await isContentScriptAvailable(tab.id);
+
+      if (!isAvailable) {
+        console.log(
+          "[PopupIDM] Content script não disponível, carregando vídeos do storage apenas"
+        );
+        loadVideos(); // Carrega do storage sem forçar scan
+        return;
+      }
+
+      console.log("[PopupIDM] Enviando força scan para tab:", tab.id);
+
+      chrome.tabs.sendMessage(tab.id, { type: "force_scan" }, (response) => {
+        if (chrome.runtime.lastError) {
+          console.error(
+            "[PopupIDM] Erro ao comunicar com content script:",
+            chrome.runtime.lastError.message
+          );
+          // Tenta recarregar mesmo com erro
+          setTimeout(loadVideos, 1000);
+        } else {
+          console.log("[PopupIDM] Resposta do content script:", response);
+          setTimeout(loadVideos, 1000);
+        }
+      });
     } catch (error) {
-      console.error("Erro ao forçar varredura:", error);
+      console.error("[PopupIDM] Erro ao forçar varredura:", error);
     }
   });
 

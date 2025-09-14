@@ -11,17 +11,36 @@ import time
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import urllib.parse
 
-# Import absoluto para evitar problemas no PyInstaller
+# ===== Bloco de imports resiliente (relative -> absolute -> path injection) =====
+# Suporta:
+# 1. python -m src.videodl.main (import relativo)
+# 2. Execução via main.py raiz (import absoluto videodl.* após inserir src no sys.path)
+# 3. Execução direta dentro da pasta (python src/videodl/main.py)
 try:
-    from videodl.downloader import VideoDownloader, FormatInfo, DownloadCancelled
-    from videodl import downloader as downloader_module
-    from videodl.simple_idm_window import SimpleIDMWindow
-except ImportError:
-    # Fallback para desenvolvimento local
-    from downloader import VideoDownloader, FormatInfo, DownloadCancelled
-    import downloader as downloader_module
-    from simple_idm_window import SimpleIDMWindow
-
+    # Execução como pacote (python -m src.videodl.main)
+    from .downloader import VideoDownloader, FormatInfo, DownloadCancelled  # type: ignore
+    from . import downloader as downloader_module  # type: ignore
+    from .simple_idm_window import SimpleIDMWindow  # type: ignore
+except Exception:
+    try:
+        # Execução direta dentro de src/videodl
+        from downloader import VideoDownloader, FormatInfo, DownloadCancelled  # type: ignore
+        import downloader as downloader_module  # type: ignore
+        from simple_idm_window import SimpleIDMWindow  # type: ignore
+    except Exception:
+        # Execução a partir da raiz usando run_app.bat (inserimos 'src' no sys.path se necessário)
+        import sys as _sys, pathlib as _pl
+        project_root = _pl.Path(__file__).resolve().parents[1]  # .../src
+        if str(project_root) not in _sys.path:
+            _sys.path.insert(0, str(project_root))
+        try:
+            from videodl.downloader import VideoDownloader, FormatInfo, DownloadCancelled  # type: ignore
+            from videodl import downloader as downloader_module  # type: ignore
+            from videodl.simple_idm_window import SimpleIDMWindow  # type: ignore
+        except Exception as _e:  # última chance
+            print(f"❌ Erro carregando módulos videodl: {_e}")
+            raise
+# ===== Fim bloco de imports resiliente =====
 
 # Verifica se pyperclip está disponível para monitoramento de clipboard
 try:
@@ -52,6 +71,7 @@ class VideoDownloaderHTTPHandler(BaseHTTPRequestHandler):
     
     def do_POST(self):
         """Handle POST requests from browser extension."""
+        logger.info(f"[HTTP] POST recebido em {self.path}")
         if self.path == '/download':
             try:
                 content_length = int(self.headers['Content-Length'])
@@ -63,14 +83,26 @@ class VideoDownloaderHTTPHandler(BaseHTTPRequestHandler):
                 source = data.get('source', 'unknown')
                 # Novo: headers completos
                 headers = data.get('headers', None)
+                # Flags específicas da Udemy
+                udemy_intercepted = data.get('udemy_intercepted', False)
+                direct_video_url = data.get('direct_video_url', False)
                 # Compatibilidade com formato antigo
                 referer = data.get('referer', '')
                 user_agent = data.get('user_agent', '')
                 cookies = data.get('cookies', '')
 
+                logger.info(f"[HTTP] URL recebida: {url[:100]}...")
+                logger.info(f"[HTTP] Título: {title[:50]}...")
+                logger.info(f"[HTTP] Headers: {len(headers or {})} recebidos")
+                
+                if udemy_intercepted:
+                    logger.info(f"[HTTP] URL INTERCEPTADA DA UDEMY detectada!")
+                    logger.info(f"[HTTP] URL direta: {direct_video_url}")
+
                 if url:
-                    # Agenda na thread principal da GUI, agora com headers extras
-                    self.app.after(0, self.app._handle_browser_request, url, title, source, headers, referer, user_agent, cookies)
+                    # Agenda na thread principal da GUI, agora com flags da Udemy
+                    logger.info("[HTTP] Agendando _handle_browser_request na thread principal...")
+                    self.app.after(0, self.app._handle_browser_request, url, title, source, headers, referer, user_agent, cookies, udemy_intercepted, direct_video_url)
 
                     self.send_response(200)
                     self.send_header('Content-Type', 'application/json')
@@ -79,11 +111,15 @@ class VideoDownloaderHTTPHandler(BaseHTTPRequestHandler):
 
                     response = {'status': 'success', 'message': 'URL recebida'}
                     self.wfile.write(json.dumps(response).encode('utf-8'))
+                    logger.info("[HTTP] Resposta de sucesso enviada")
                 else:
+                    logger.warning("[HTTP] URL vazia recebida")
                     self.send_error(400, 'URL não fornecida')
 
             except Exception as e:
                 logger.error(f"Erro no servidor HTTP: {e}")
+                import traceback
+                logger.error(f"Traceback: {traceback.format_exc()}")
                 self.send_error(500, str(e))
         else:
             self.send_error(404, 'Endpoint não encontrado')
@@ -165,8 +201,23 @@ class App(tk.Tk):
         self.http_server = VideoDownloaderHTTPServer(self)
         self.browser_integration_enabled = False
 
+        # Ativa integração automaticamente na primeira execução se não houver prefs
+        try:
+            if not os.path.exists(os.path.join(os.path.expanduser('~'), '.videodownloader_prefs.json')):
+                self.browser_integration_var.set(True)
+        except Exception:
+            pass
+
         self._build_ui()
         self._load_prefs()
+        # Se checkbox está marcado mas servidor não iniciou ainda, tenta iniciar
+        if self.browser_integration_var.get() and not self.browser_integration_enabled:
+            started = self.http_server.start()
+            if started:
+                self.browser_integration_enabled = True
+                self.log("🌐 Integração com navegador ativa (auto)")
+            else:
+                self.log("❌ Falha ao iniciar integração automática (porta ocupada?)")
         self._check_ffmpeg()
         self._start_browser_integration()
         # salva preferências ao fechar
@@ -379,7 +430,21 @@ class App(tk.Tk):
                 self.after(0, update)
             except Exception as e:
                 logger.error(f"[on_list_formats] Erro ao analisar URL: {e}")
-                self.after(0, lambda: messagebox.showerror("Erro", str(e)))
+                
+                # Mensagem específica para Udemy
+                if 'udemy.com' in self.url_var.get().lower() and ('403' in str(e) or 'Forbidden' in str(e)):
+                    error_msg = ("⚠️ UDEMY DETECTADA - LIMITAÇÕES CONHECIDAS\n\n"
+                                "A Udemy tem proteções anti-bot muito rigorosas que impedem o download direto.\n\n"
+                                "💡 ALTERNATIVAS:\n"
+                                "• Use a funcionalidade de download offline oficial da Udemy\n"
+                                "• Verifique se você está logado na Udemy no navegador\n"
+                                "• Tente copiar a URL do vídeo específico (não da página do curso)\n\n"
+                                "🎯 OUTROS SITES FUNCIONAM NORMALMENTE:\n"
+                                "YouTube, Vimeo, Rocketseat, etc.")
+                    self.after(0, lambda: messagebox.showwarning("Limitação da Udemy", error_msg))
+                else:
+                    self.after(0, lambda: messagebox.showerror("Erro", str(e)))
+                    
                 self.after(0, lambda: self.status_var.set("❌ Erro ao listar"))
                 self.after(0, lambda: self.info_label.config(text="❌ Erro ao carregar informações"))
         threading.Thread(target=worker, daemon=True).start()
@@ -643,6 +708,107 @@ class App(tk.Tk):
             if result:
                 self.on_list_formats()
 
+    def _download_direct_udemy_url(self, url: str, title: str, headers: dict = None):
+        """Download direto de URL interceptada da Udemy sem usar extratores."""
+        try:
+            logger.info(f"[DIRECT UDEMY] Iniciando download direto: {url}")
+            self.log("🎯 Preparando download direto da Udemy...")
+            
+            # Usa pasta Downloads padrão
+            output_dir = self.dest_var.get().strip() or os.path.join(os.path.expanduser("~"), "Downloads")
+            
+            # Cria thread para download direto
+            download_thread = threading.Thread(
+                target=self._run_direct_download,
+                args=(url, output_dir, title, headers),
+                daemon=True
+            )
+            download_thread.start()
+            
+        except Exception as e:
+            logger.error(f"[DIRECT UDEMY] Erro: {e}")
+            self.log(f"❌ Erro no download direto: {e}")
+
+    def _run_direct_download(self, url: str, output_dir: str, title: str, headers: dict = None):
+        """Executa download direto em thread separada."""
+        import subprocess, sys
+        try:
+            logger.info(f"[DIRECT UDEMY] Executando download direto...")
+            self.log("⬇️ Baixando arquivo diretamente...")
+
+
+            # Callback de progresso
+            def progress_callback(d):
+                status = d.get('status')
+                if status == 'downloading':
+                    percent = d.get('_percent_str', None)
+                    speed = d.get('_speed_str', '')
+                    self.after(0, self.log, f"⬇️ Baixando: {percent or '...'} - {speed}")
+                    if percent:
+                        self.after(0, self._update_progress_bar, percent)
+                    else:
+                        # Se não há percent (ffmpeg), ativa modo indeterminado
+                        self.after(0, self._set_progress_indeterminate)
+                elif status == 'finished':
+                    filename = d.get('filename', None)
+                    self.after(0, self.log, f"✅ Download concluído: {os.path.basename(filename) if filename else title}")
+                    self.after(0, self._open_download_folder, filename)
+
+            # Atualiza barra de progresso
+            def _update_progress_bar(self, percent_str):
+                try:
+                    percent = float(percent_str.replace('%','').strip())
+                except Exception:
+                    percent = 0.0
+                self.progress_bar.config(mode='determinate')
+                self.progress_var.set(percent)
+            self._update_progress_bar = _update_progress_bar.__get__(self)
+
+            def _set_progress_indeterminate(self):
+                self.progress_bar.config(mode='indeterminate')
+                self.progress_bar.start(10)
+            self._set_progress_indeterminate = _set_progress_indeterminate.__get__(self)
+
+            # Abre pasta do arquivo baixado
+            def _open_download_folder(self, filepath):
+                import glob
+                try:
+                    # Se não veio filename, tenta deduzir
+                    if not filepath:
+                        # Busca arquivo mp4 na pasta de saída
+                        pattern = os.path.join(output_dir, f"{self._sanitize(title)}*.mp4")
+                        files = glob.glob(pattern)
+                        if files:
+                            filepath = files[0]
+                        else:
+                            return
+                    folder = os.path.dirname(filepath)
+                    if sys.platform.startswith('win'):
+                        subprocess.Popen(f'explorer /select,"{filepath}"')
+                    elif sys.platform.startswith('darwin'):
+                        subprocess.Popen(['open', '--', folder])
+                    else:
+                        subprocess.Popen(['xdg-open', folder])
+                except Exception as e:
+                    self.log(f"⚠️ Não foi possível abrir a pasta: {e}")
+            self._open_download_folder = _open_download_folder.__get__(self)
+
+            # Usa função de download direto
+            self.downloader.download_direct_url(
+                url=url,
+                output_dir=output_dir,
+                title=title,
+                extra_headers=headers,
+                progress_cb=progress_callback
+            )
+
+            logger.info(f"[DIRECT UDEMY] Download direto concluído com sucesso")
+            self.after(0, self.log, "🎉 Download da Udemy concluído!")
+
+        except Exception as e:
+            logger.error(f"[DIRECT UDEMY] Erro no download: {e}")
+            self.after(0, self.log, f"❌ Erro no download direto: {e}")
+
     def _start_auto_download(self):
         """Inicia análise e download automático (estilo IDM)."""
         self.log("🚀 Iniciando download automático estilo IDM...")
@@ -735,10 +901,28 @@ Depois:
 
 Funciona em: YouTube, Vimeo, etc.
         """
-        messagebox.showinfo("🌐 Como usar integração com navegador", instructions)
+        try:
+            messagebox.showinfo("🌐 Como usar integração com navegador", instructions)
+        except Exception as e:
+            self.log(f"[WARN] Não foi possível mostrar dialog instruções: {e}")
 
-    def _handle_browser_request(self, url: str, title: str, source: str, headers: dict = None, referer: str = "", user_agent: str = "", cookies: str = ""):
+    def _handle_browser_request(self, url: str, title: str, source: str, headers: dict = None, referer: str = "", user_agent: str = "", cookies: str = "", udemy_intercepted: bool = False, direct_video_url: bool = False):
         """Processa requisição vinda do navegador - Abre janela IDM-like."""
+        logger.info(f"[HANDLER] _handle_browser_request CHAMADO!")
+        logger.info(f"[HANDLER] URL: {url}")
+        logger.info(f"[HANDLER] Título: {title}")
+        
+        if udemy_intercepted:
+            logger.info(f"[HANDLER] 🎯 URL INTERCEPTADA DA UDEMY!")
+            logger.info(f"[HANDLER] 📹 URL direta de vídeo: {direct_video_url}")
+            self.log(f"🎯 URL INTERCEPTADA DA UDEMY: {title[:50]}...")
+            
+            # Para URLs interceptadas, usa download direto imediatamente
+            if direct_video_url:
+                self.log("📹 Iniciando download direto (sem extrator)...")
+                self._download_direct_udemy_url(url, title, headers)
+                return
+        
         self.log(f"🌐 Vídeo detectado pelo navegador: {title[:50]}...")
         self.log(f"🔗 URL: {url}")
         self.log(f"📡 Headers: {len(headers or {})} headers recebidos")
@@ -755,14 +939,18 @@ Funciona em: YouTube, Vimeo, etc.
 
         # Abre janela IDM-like simples no thread principal
         try:
+            logger.info("[HANDLER] Tentando criar SimpleIDMWindow...")
             self.log("🔧 Abrindo janela IDM-like...")
             
             # Cria e mostra a janela IDM
             idm_window = SimpleIDMWindow(self, url, title, headers)
+            logger.info("[HANDLER] SimpleIDMWindow criada com sucesso")
             self.log("✅ Janela IDM criada, aguardando usuário...")
             
             # Aguarda resposta do usuário
+            logger.info("[HANDLER] Chamando idm_window.show()...")
             result, custom_title = idm_window.show()
+            logger.info(f"[HANDLER] idm_window.show() retornou: result={result}, custom_title={custom_title}")
             
             if result:
                 self.log("✅ Usuário confirmou download!")

@@ -14,8 +14,75 @@
         this.responseURL &&
         this.getAllResponseHeaders
       ) {
-        // Só salva se for vídeo ou m3u8/mpd
-        if (/\.(mp4|m3u8|mpd|webm|mov|ts)([?#].*)?$/i.test(this.responseURL)) {
+        // Para APIs da Udemy, extrai URLs de vídeo da resposta
+        if (
+          this._vd_url &&
+          this._vd_url.includes("udemy.com") &&
+          (this._vd_url.includes("course-taking") ||
+            this._vd_url.includes("media-src") ||
+            this._vd_url.includes("assets") ||
+            this._vd_url.includes("lecture"))
+        ) {
+          try {
+            const responseText = this.responseText || this.response;
+            if (typeof responseText === "string") {
+              // Busca por URLs mais específicas da Udemy
+              const patterns = [
+                /https:\/\/[^"'\s]*\.cloudfront\.net\/[^"'\s]*\.(?:mp4|m3u8|webm)(?:\?[^"'\s]*)?/gi,
+                /https:\/\/[^"'\s]*udemy[^"'\s]*\.(?:mp4|m3u8|webm)(?:\?[^"'\s]*)?/gi,
+                /"manifest_url":\s*"([^"]+)"/gi,
+                /"Video":\s*\[\s*\{\s*"[^"]*":\s*"([^"]+\.(?:mp4|m3u8|webm)[^"]*)"/gi,
+                /"src":\s*"([^"]*\.(?:mp4|m3u8|webm)[^"]*)"/gi,
+                /"file":\s*"([^"]*\.(?:mp4|m3u8|webm)[^"]*)"/gi,
+                /"url":\s*"([^"]*\.(?:mp4|m3u8|webm)[^"]*)"/gi,
+              ];
+
+              let foundUrls = [];
+              patterns.forEach((pattern) => {
+                let match;
+                while ((match = pattern.exec(responseText)) !== null) {
+                  foundUrls.push(match[1] || match[0]);
+                }
+              });
+
+              if (foundUrls.length > 0) {
+                console.log(
+                  "[Udemy Video Detector] URLs de vídeo encontradas via XHR:",
+                  foundUrls
+                );
+
+                // Salva as URLs encontradas
+                foundUrls.forEach((videoUrl) => {
+                  chrome.storage.local.set({
+                    [`udemy_video_${Date.now()}_${Math.random()}`]: {
+                      url: videoUrl,
+                      title: document.title,
+                      source: "udemy_xhr_intercept",
+                      timestamp: Date.now(),
+                      api_url: this._vd_url,
+                    },
+                  });
+                });
+              }
+            }
+          } catch (e) {
+            console.log(
+              "[Udemy Video Detector] Erro ao processar resposta XHR:",
+              e
+            );
+          }
+        }
+
+        // Salva se for vídeo, m3u8/mpd, ou URLs específicas da Udemy/streaming
+        if (
+          /\.(mp4|m3u8|mpd|webm|mov|ts)([?#].*)?$/i.test(this.responseURL) ||
+          this.responseURL.includes("cloudfront.net") ||
+          (this.responseURL.includes("udemy.com") &&
+            this.responseURL.includes("video")) ||
+          this.responseURL.includes("media-src") ||
+          this.responseURL.includes("hls") ||
+          this.responseURL.includes("stream")
+        ) {
           const headers = {};
           try {
             const raw = this.getAllResponseHeaders();
@@ -41,7 +108,73 @@
     const response = await originalFetch(input, init);
     try {
       let url = typeof input === "string" ? input : input.url;
-      if (/\.(mp4|m3u8|mpd|webm|mov|ts)([?#].*)?$/i.test(url)) {
+
+      // Intercepta respostas da API da Udemy que podem conter URLs de vídeo
+      if (
+        url.includes("udemy.com") &&
+        (url.includes("course-taking") ||
+          url.includes("media-src") ||
+          url.includes("assets") ||
+          url.includes("lecture"))
+      ) {
+        try {
+          const clonedResponse = response.clone();
+          const text = await clonedResponse.text();
+
+          // Busca por URLs mais específicas da Udemy
+          const patterns = [
+            /https:\/\/[^"'\s]*\.cloudfront\.net\/[^"'\s]*\.(?:mp4|m3u8|webm)(?:\?[^"'\s]*)?/gi,
+            /https:\/\/[^"'\s]*udemy[^"'\s]*\.(?:mp4|m3u8|webm)(?:\?[^"'\s]*)?/gi,
+            /"manifest_url":\s*"([^"]+)"/gi,
+            /"Video":\s*\[\s*\{\s*"[^"]*":\s*"([^"]+\.(?:mp4|m3u8|webm)[^"]*)"/gi,
+            /"src":\s*"([^"]*\.(?:mp4|m3u8|webm)[^"]*)"/gi,
+            /"file":\s*"([^"]*\.(?:mp4|m3u8|webm)[^"]*)"/gi,
+            /"url":\s*"([^"]*\.(?:mp4|m3u8|webm)[^"]*)"/gi,
+          ];
+
+          let foundUrls = [];
+          patterns.forEach((pattern) => {
+            let match;
+            while ((match = pattern.exec(text)) !== null) {
+              foundUrls.push(match[1] || match[0]);
+            }
+          });
+
+          if (foundUrls.length > 0) {
+            console.log(
+              "[Udemy Video Detector] URLs de vídeo encontradas na API:",
+              foundUrls
+            );
+
+            // Salva as URLs encontradas
+            foundUrls.forEach((videoUrl) => {
+              chrome.storage.local.set({
+                [`udemy_video_${Date.now()}_${Math.random()}`]: {
+                  url: videoUrl,
+                  title: document.title,
+                  source: "udemy_api_intercept",
+                  timestamp: Date.now(),
+                  api_url: url,
+                },
+              });
+            });
+          }
+        } catch (e) {
+          console.log(
+            "[Udemy Video Detector] Erro ao processar resposta da API:",
+            e
+          );
+        }
+      }
+
+      if (
+        /\.(mp4|m3u8|mpd|webm|mov|ts)([?#].*)?$/i.test(url) ||
+        url.includes("cloudfront.net") ||
+        (url.includes("udemy.com") && url.includes("video")) ||
+        url.includes("media-src") ||
+        url.includes("hls") ||
+        url.includes("stream")
+      ) {
         const headers = {};
         response.headers.forEach((v, k) => {
           headers[k] = v;
@@ -558,7 +691,28 @@ class UniversalVideoDetector {
     const originalFetch = window.fetch;
     window.fetch = async (...args) => {
       const response = await originalFetch(...args);
-      this.analyzeNetworkRequest(args[0]);
+      try {
+        let url = typeof args[0] === "string" ? args[0] : args[0].url;
+        this.analyzeNetworkRequest(url);
+        // Se for Udemy e for manifest/segmento, salva no storage
+        if (
+          url &&
+          url.includes("udemycdn.com") &&
+          (url.includes(".mpd") ||
+            url.includes(".m3u8") ||
+            url.includes(".mp4"))
+        ) {
+          chrome.storage.local.set({
+            [`udemy_video_${Date.now()}_${Math.random()}`]: {
+              url: url,
+              title: document.title,
+              source: "udemy_network_intercept",
+              timestamp: Date.now(),
+              api_url: url,
+            },
+          });
+        }
+      } catch {}
       return response;
     };
 
@@ -567,6 +721,23 @@ class UniversalVideoDetector {
     XMLHttpRequest.prototype.open = function (method, url) {
       if (url && typeof url === "string") {
         videoDetector.analyzeNetworkRequest(url);
+        // Se for Udemy e for manifest/segmento, salva no storage
+        if (
+          url.includes("udemycdn.com") &&
+          (url.includes(".mpd") ||
+            url.includes(".m3u8") ||
+            url.includes(".mp4"))
+        ) {
+          chrome.storage.local.set({
+            [`udemy_video_${Date.now()}_${Math.random()}`]: {
+              url: url,
+              title: document.title,
+              source: "udemy_network_intercept",
+              timestamp: Date.now(),
+              api_url: url,
+            },
+          });
+        }
       }
       return originalOpen.apply(this, arguments);
     };
@@ -574,10 +745,13 @@ class UniversalVideoDetector {
 
   analyzeNetworkRequest(url) {
     if (typeof url === "string") {
+      // Log global para debug de toda URL de rede
+      console.log("[DEBUG VideoDetector] Network request:", url);
+
       // Verifica se é URL de vídeo
       if (this.isVideoURL(url) || this.isDirectVideoFile(url)) {
         this.networkUrls.add(url);
-        console.log("Video URL detectada na rede:", url);
+        console.log("[DEBUG VideoDetector] Video URL detectada na rede:", url);
       }
 
       // Também procura por URLs que podem conter parâmetros de vídeo
@@ -594,7 +768,10 @@ class UniversalVideoDetector {
           url.includes("manifest")
         ) {
           this.networkUrls.add(url);
-          console.log("Video URL com parâmetros detectada:", url);
+          console.log(
+            "[DEBUG VideoDetector] Video URL com parâmetros detectada:",
+            url
+          );
         }
       }
 
@@ -1276,140 +1453,9 @@ class UniversalVideoDetector {
     });
 
     if (uniqueVideos.length > 0) {
-      this.showVideoDetectionUI(uniqueVideos);
+      // Removido: this.showVideoDetectionUI(uniqueVideos); - botão Download Video removido
       this.notifyExtension(uniqueVideos);
     }
-  }
-
-  showVideoDetectionUI(videos) {
-    // Remove UI anterior
-    const existingUI = document.getElementById("video-downloader-ui");
-    if (existingUI) existingUI.remove();
-
-    // Cria overlay mais chamativo
-    const overlay = document.createElement("div");
-    overlay.id = "video-downloader-ui";
-    overlay.innerHTML = `
-      <div style="
-        position: fixed;
-        top: 20px;
-        right: 20px;
-        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-        color: white;
-        padding: 16px 20px;
-        border-radius: 12px;
-        box-shadow: 0 8px 32px rgba(0,0,0,0.3);
-        z-index: 2147483647;
-        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-        font-size: 14px;
-        max-width: 350px;
-        transition: all 0.3s ease;
-        border: 2px solid rgba(255,255,255,0.2);
-        backdrop-filter: blur(10px);
-      " id="video-notification-card">
-        <div style="display: flex; align-items: center; gap: 12px; position: relative;">
-          <span style="font-size: 24px; animation: pulse 2s infinite;">🎬</span>
-          <div style="flex: 1; cursor: pointer;" id="notification-content">
-            <div style="font-weight: bold; font-size: 16px;">Download Video</div>
-          </div>
-          <button style="
-            position: absolute;
-            top: -8px;
-            right: -8px;
-            background: rgba(255,255,255,0.2);
-            border: none;
-            border-radius: 50%;
-            width: 24px;
-            height: 24px;
-            color: white;
-            font-size: 14px;
-            font-weight: bold;
-            cursor: pointer;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            transition: background 0.2s ease;
-            backdrop-filter: blur(5px);
-          " id="close-notification" 
-            onmouseover="this.style.background='rgba(255,255,255,0.3)'" 
-            onmouseout="this.style.background='rgba(255,255,255,0.2)'">×</button>
-        </div>
-      </div>
-      <style>
-        @keyframes pulse {
-          0%, 100% { transform: scale(1); }
-          50% { transform: scale(1.1); }
-        }
-        #notification-content:hover {
-          transform: scale(1.02);
-        }
-      </style>
-    `;
-
-    document.body.appendChild(overlay);
-
-    // Auto-remove após 8 segundos
-    const autoRemoveTimeout = setTimeout(() => {
-      if (overlay.parentNode) overlay.remove();
-    }, 8000);
-
-    // Botão de fechar
-    const closeBtn = overlay.querySelector("#close-notification");
-    closeBtn.addEventListener("click", (e) => {
-      e.stopPropagation(); // Evita que o clique dispare o download
-      clearTimeout(autoRemoveTimeout);
-
-      // Adiciona todos os vídeos desta notificação à lista de dispensados
-      videos.forEach((video) => {
-        this.dismissedVideos.add(video.url);
-      });
-
-      console.log("🚫 Notificação dispensada pelo usuário");
-      overlay.remove();
-
-      // Mostra confirmação rápida
-      this.showDismissConfirmation(videos.length);
-    });
-
-    // Clique na área de conteúdo para baixar
-    const content = overlay.querySelector("#notification-content");
-    content.addEventListener("click", (e) => {
-      e.stopPropagation();
-      clearTimeout(autoRemoveTimeout);
-      this.sendToDownloader(videos[0]);
-      overlay.remove();
-    });
-  }
-
-  showDismissConfirmation(count) {
-    const confirmation = document.createElement("div");
-    confirmation.innerHTML = `
-      <div style="
-        position: fixed;
-        top: 20px;
-        right: 20px;
-        background: rgba(0,0,0,0.8);
-        color: white;
-        padding: 12px 16px;
-        border-radius: 8px;
-        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-        font-size: 14px;
-        z-index: 2147483647;
-        backdrop-filter: blur(10px);
-        border: 1px solid rgba(255,255,255,0.2);
-      ">
-        ✅ Notificação dispensada (${count} vídeo${count > 1 ? "s" : ""})
-      </div>
-    `;
-
-    document.body.appendChild(confirmation);
-
-    // Remove após 2 segundos
-    setTimeout(() => {
-      if (confirmation.parentNode) {
-        confirmation.remove();
-      }
-    }, 2000);
   }
 
   notifyExtension(videos) {
@@ -1426,20 +1472,43 @@ class UniversalVideoDetector {
   }
 
   sendToDownloader(video) {
+    console.log(
+      "[NotificationIDM] Iniciando sendToDownloader com video:",
+      video
+    );
+    console.log("[NotificationIDM] URL do video:", video.url);
+    console.log("[NotificationIDM] Título do video:", video.title);
+
     // Múltiplas estratégias de envio
-    Promise.race([this.sendViaHTTP(video), this.sendViaClipboard(video)]).then(
-      (success) => {
+    Promise.race([this.sendViaHTTP(video), this.sendViaClipboard(video)])
+      .then((success) => {
+        console.log("[NotificationIDM] Resultado do Promise.race:", success);
+
         if (success) {
+          console.log(
+            "[NotificationIDM] Sucesso! Mostrando notificação de sucesso"
+          );
           this.showSuccess(video);
         } else {
+          console.log(
+            "[NotificationIDM] Falha no envio - mostrando instruções"
+          );
           this.showInstructions(video);
         }
-      }
-    );
+      })
+      .catch((error) => {
+        console.error("[NotificationIDM] Erro no sendToDownloader:", error);
+      });
   }
 
   async sendViaHTTP(video) {
+    console.log("[NotificationIDM] 🚀 Iniciando sendViaHTTP...");
+    console.log("[NotificationIDM] Video URL:", video.url);
+    console.log("[NotificationIDM] Video title:", video.title);
+
     try {
+      console.log("[NotificationIDM] Coletando headers completos...");
+
       // Coleta headers completos como no popup.js
       let allHeaders = {};
 
@@ -1453,8 +1522,15 @@ class UniversalVideoDetector {
             "[NotificationIDM] Headers de requisição encontrados:",
             allHeaders
           );
+        } else {
+          console.log(
+            "[NotificationIDM] Nenhum header webRequest encontrado para:",
+            requestKey
+          );
         }
-      } catch (e) {}
+      } catch (e) {
+        console.log("[NotificationIDM] Erro ao buscar headers webRequest:", e);
+      }
 
       // 2. Fallback: buscar headers do userscript/XHR
       if (Object.keys(allHeaders).length === 0) {
@@ -1563,23 +1639,52 @@ class UniversalVideoDetector {
         } catch (e) {}
       }
 
-      console.log("[NotificationIDM] Enviando headers:", allHeaders);
+      console.log("[NotificationIDM] Título final melhorado:", improvedTitle);
+      console.log(
+        "[NotificationIDM] Headers finais que serão enviados:",
+        allHeaders
+      );
+
+      const requestBody = {
+        url: video.url,
+        title: improvedTitle, // Usa o título melhorado
+        source: video.source || "browser_extension",
+        headers: allHeaders, // Agora inclui headers completos!
+      };
+
+      console.log(
+        "[NotificationIDM] 📡 Fazendo POST para localhost:8765/download..."
+      );
+      console.log("[NotificationIDM] Body da requisição:", requestBody);
 
       const response = await fetch("http://localhost:8765/download", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          url: video.url,
-          title: improvedTitle, // Usa o título melhorado
-          source: video.source || "browser_extension",
-          headers: allHeaders, // Agora inclui headers completos!
-        }),
+        body: JSON.stringify(requestBody),
         signal: AbortSignal.timeout(3000), // 3 segundo timeout
       });
 
+      console.log(
+        "[NotificationIDM] Resposta recebida - Status:",
+        response.status
+      );
+      console.log("[NotificationIDM] Response.ok:", response.ok);
+
+      if (response.ok) {
+        console.log("[NotificationIDM] ✅ HTTP request enviado com sucesso!");
+      } else {
+        console.log(
+          "[NotificationIDM] ❌ HTTP request falhou com status:",
+          response.status
+        );
+        const responseText = await response.text();
+        console.log("[NotificationIDM] Texto da resposta:", responseText);
+      }
+
       return response.ok;
     } catch (error) {
-      console.log("App não está rodando:", error.message);
+      console.log("[NotificationIDM] ❌ Erro no sendViaHTTP:", error.message);
+      console.log("[NotificationIDM] App não está rodando ou erro de conexão");
       return false;
     }
   }
@@ -1695,6 +1800,377 @@ URL: ${video.url}
 // Inicia detector universal
 let videoDetector;
 
+// Função para monitorar URLs de vídeo interceptadas da Udemy
+function monitorUdemyVideoUrls() {
+  setInterval(() => {
+    chrome.storage.local.get(null, (items) => {
+      const udemyVideos = Object.keys(items).filter((key) =>
+        key.startsWith("udemy_video_")
+      );
+      if (udemyVideos.length > 0) {
+        console.log(
+          `[Udemy Monitor] ${udemyVideos.length} URLs de vídeo interceptadas:`,
+          udemyVideos.map((key) => items[key])
+        );
+      }
+    });
+  }, 5000); // Verifica a cada 5 segundos
+}
+
+// Inicia o monitoramento se estivermos na Udemy
+if (window.location.hostname.includes("udemy.com")) {
+  monitorUdemyVideoUrls();
+  console.log(
+    "[Udemy Video Detector] Sistema de interceptação inicializado para Udemy"
+  );
+
+  // FORÇA interceptação imediata nas APIs existentes
+  setTimeout(() => {
+    console.log("[Udemy Video Detector] Forçando análise de APIs da Udemy...");
+
+    // Intercepta todas as chamadas fetch/XHR futuras
+    const originalFetch = window.fetch;
+    window.fetch = async function (...args) {
+      const response = await originalFetch.apply(this, args);
+      const [url] = args;
+
+      if (url && url.includes("udemy.com")) {
+        console.log("[Udemy Force Detector] Fetch interceptado:", url);
+
+        if (
+          url.includes("course-taking") ||
+          url.includes("lecture") ||
+          url.includes("media-src") ||
+          url.includes("curriculum-item")
+        ) {
+          try {
+            const clonedResponse = response.clone();
+            const text = await clonedResponse.text();
+            console.log("[Udemy Force Detector] Analisando resposta da API...");
+
+            // Busca mais agressiva por URLs
+            const allMatches = [
+              ...text.matchAll(
+                /https:\/\/[^"'\s,\]]*\.cloudfront\.net\/[^"'\s,\]]*\.(?:mp4|m3u8|webm|ts)(?:\?[^"'\s,\]]*)?/gi
+              ),
+              ...text.matchAll(/"manifest_url":\s*"([^"]+)"/gi),
+              ...text.matchAll(
+                /"src":\s*"([^"]*\.(?:mp4|m3u8|webm|ts)[^"]*)"/gi
+              ),
+              ...text.matchAll(
+                /"file":\s*"([^"]*\.(?:mp4|m3u8|webm|ts)[^"]*)"/gi
+              ),
+              ...text.matchAll(/"video_url":\s*"([^"]+)"/gi),
+              ...text.matchAll(/"stream_url":\s*"([^"]+)"/gi),
+              ...text.matchAll(
+                /https:\/\/[^"'\s,\]]*udemy[^"'\s,\]]*\.(?:mp4|m3u8|webm|ts)(?:\?[^"'\s,\]]*)?/gi
+              ),
+            ];
+
+            if (allMatches.length > 0) {
+              console.log(
+                "[Udemy Force Detector] 🎯 URLS ENCONTRADAS:",
+                allMatches
+              );
+
+              allMatches.forEach((match, index) => {
+                const videoUrl = match[1] || match[0];
+                if (videoUrl && videoUrl.startsWith("http")) {
+                  console.log(
+                    `[Udemy Force Detector] 🎯 Salvando URL ${index}:`,
+                    videoUrl
+                  );
+                  chrome.storage.local.set({
+                    [`udemy_video_${Date.now()}_${Math.random()}`]: {
+                      url: videoUrl,
+                      title: document.title,
+                      source: "udemy_force_fetch",
+                      timestamp: Date.now(),
+                      api_url: url,
+                    },
+                  });
+                }
+              });
+            }
+          } catch (e) {
+            console.log("[Udemy Force Detector] Erro:", e);
+          }
+        }
+      }
+
+      return response;
+    };
+
+    // Força refresh das APIs conhecidas da Udemy
+    const lectureId = window.location.pathname.match(/lecture\/(\d+)/)?.[1];
+    if (lectureId) {
+      console.log("[Udemy Force Detector] Lecture ID encontrado:", lectureId);
+
+      // Faz requisições diretas para APIs conhecidas
+      const apiUrls = [
+        `/api-2.0/courses/course/curriculum-items/${lectureId}/`,
+        `/api-2.0/users/me/subscribed-courses/course/curriculum-items/${lectureId}/`,
+        `/api-2.0/course-taking/course/curriculum-items/${lectureId}/lecture/`,
+      ];
+
+      apiUrls.forEach((apiPath) => {
+        fetch(apiPath)
+          .then((response) => response.text())
+          .then((text) => {
+            console.log(
+              `[Udemy Force Detector] Resposta de ${apiPath}:`,
+              text.length,
+              "chars"
+            );
+            // A interceptação acima já vai processar isso
+          })
+          .catch((e) =>
+            console.log(`[Udemy Force Detector] Erro em ${apiPath}:`, e)
+          );
+      });
+    }
+  }, 2000);
+
+  // Interceptação adicional para elementos de vídeo
+  const observer = new MutationObserver((mutations) => {
+    mutations.forEach((mutation) => {
+      mutation.addedNodes.forEach((node) => {
+        if (node.nodeType === 1) {
+          // Element node
+          // Procura por elementos video
+          const videos =
+            node.tagName === "VIDEO"
+              ? [node]
+              : node.querySelectorAll?.("video") || [];
+          videos.forEach((video) => {
+            if (
+              video.src &&
+              (video.src.includes(".mp4") || video.src.includes(".m3u8"))
+            ) {
+              console.log(
+                "[Udemy Video Detector] Elemento video encontrado:",
+                video.src
+              );
+              chrome.storage.local.set({
+                [`udemy_video_${Date.now()}_${Math.random()}`]: {
+                  url: video.src,
+                  title: document.title,
+                  source: "udemy_video_element",
+                  timestamp: Date.now(),
+                },
+              });
+            }
+          });
+
+          // Procura por elementos source dentro de video
+          const sources = node.querySelectorAll?.("source") || [];
+          sources.forEach((source) => {
+            if (
+              source.src &&
+              (source.src.includes(".mp4") || source.src.includes(".m3u8"))
+            ) {
+              console.log(
+                "[Udemy Video Detector] Source element encontrado:",
+                source.src
+              );
+              chrome.storage.local.set({
+                [`udemy_video_${Date.now()}_${Math.random()}`]: {
+                  url: source.src,
+                  title: document.title,
+                  source: "udemy_source_element",
+                  timestamp: Date.now(),
+                },
+              });
+            }
+          });
+        }
+      });
+    });
+  });
+
+  observer.observe(document.body, {
+    childList: true,
+    subtree: true,
+  });
+
+  // Interceptação por monitoramento de atributos src
+  const srcObserver = new MutationObserver((mutations) => {
+    mutations.forEach((mutation) => {
+      if (mutation.type === "attributes" && mutation.attributeName === "src") {
+        const element = mutation.target;
+        if (element.tagName === "VIDEO" || element.tagName === "SOURCE") {
+          const src = element.src;
+          if (
+            src &&
+            (src.includes(".mp4") ||
+              src.includes(".m3u8") ||
+              src.includes("cloudfront"))
+          ) {
+            console.log("[Udemy Video Detector] Src attribute mudou:", src);
+            chrome.storage.local.set({
+              [`udemy_video_${Date.now()}_${Math.random()}`]: {
+                url: src,
+                title: document.title,
+                source: "udemy_src_change",
+                timestamp: Date.now(),
+              },
+            });
+          }
+        }
+      }
+    });
+  });
+
+  // Observa mudanças nos atributos src de todos os elementos video/source
+  document.querySelectorAll("video, source").forEach((element) => {
+    srcObserver.observe(element, {
+      attributes: true,
+      attributeFilter: ["src"],
+    });
+  });
+
+  // Interceptação de MediaSource APIs (para streaming moderno)
+  if (window.MediaSource) {
+    const originalAddSourceBuffer = MediaSource.prototype.addSourceBuffer;
+    MediaSource.prototype.addSourceBuffer = function (mimeType) {
+      console.log(
+        "[Udemy Video Detector] MediaSource addSourceBuffer:",
+        mimeType
+      );
+      return originalAddSourceBuffer.call(this, mimeType);
+    };
+  }
+
+  // Interceptação específica para Shaka Player (usado pela Udemy)
+  if (window.shaka) {
+    console.log("[Udemy Video Detector] Shaka Player detectado!");
+
+    // Intercepta criação de players
+    const originalPlayerConstructor = window.shaka.Player;
+    window.shaka.Player = function (...args) {
+      const player = new originalPlayerConstructor(...args);
+      console.log("[Udemy Video Detector] Novo Shaka Player criado:", player);
+
+      // Intercepta load do manifest
+      const originalLoad = player.load;
+      player.load = function (manifestUri, ...loadArgs) {
+        console.log(
+          "[Udemy Video Detector] Shaka Player carregando manifest:",
+          manifestUri
+        );
+        if (
+          manifestUri &&
+          (manifestUri.includes(".m3u8") || manifestUri.includes(".mpd"))
+        ) {
+          chrome.storage.local.set({
+            [`udemy_video_${Date.now()}_${Math.random()}`]: {
+              url: manifestUri,
+              title: document.title,
+              source: "udemy_shaka_manifest",
+              timestamp: Date.now(),
+              type: "manifest",
+            },
+          });
+        }
+        return originalLoad.call(this, manifestUri, ...loadArgs);
+      };
+
+      return player;
+    };
+
+    // Copia propriedades estáticas
+    Object.setPrototypeOf(window.shaka.Player, originalPlayerConstructor);
+    Object.assign(window.shaka.Player, originalPlayerConstructor);
+  }
+
+  // Interceptação global de window para detectar quando o Shaka é carregado
+  Object.defineProperty(window, "shaka", {
+    set: function (value) {
+      console.log("[Udemy Video Detector] Shaka Player sendo definido:", value);
+      this._shaka = value;
+
+      if (value && value.Player) {
+        // Mesmo código de interceptação acima
+        const originalPlayerConstructor = value.Player;
+        value.Player = function (...args) {
+          const player = new originalPlayerConstructor(...args);
+          console.log(
+            "[Udemy Video Detector] Novo Shaka Player criado:",
+            player
+          );
+
+          const originalLoad = player.load;
+          player.load = function (manifestUri, ...loadArgs) {
+            console.log(
+              "[Udemy Video Detector] Shaka Player carregando manifest:",
+              manifestUri
+            );
+            if (
+              manifestUri &&
+              (manifestUri.includes(".m3u8") || manifestUri.includes(".mpd"))
+            ) {
+              chrome.storage.local.set({
+                [`udemy_video_${Date.now()}_${Math.random()}`]: {
+                  url: manifestUri,
+                  title: document.title,
+                  source: "udemy_shaka_manifest",
+                  timestamp: Date.now(),
+                  type: "manifest",
+                },
+              });
+            }
+            return originalLoad.call(this, manifestUri, ...loadArgs);
+          };
+
+          return player;
+        };
+
+        Object.setPrototypeOf(value.Player, originalPlayerConstructor);
+        Object.assign(value.Player, originalPlayerConstructor);
+      }
+    },
+    get: function () {
+      return this._shaka;
+    },
+    configurable: true,
+  });
+
+  // Interceptação de URL.createObjectURL (para blobs de vídeo)
+  const originalCreateObjectURL = URL.createObjectURL;
+  URL.createObjectURL = function (obj) {
+    const url = originalCreateObjectURL.call(this, obj);
+    if (obj instanceof Blob && obj.type && obj.type.includes("video")) {
+      console.log("[Udemy Video Detector] Blob URL criada para vídeo:", url);
+      chrome.storage.local.set({
+        [`udemy_video_${Date.now()}_${Math.random()}`]: {
+          url: url,
+          title: document.title,
+          source: "udemy_blob_url",
+          timestamp: Date.now(),
+          blob_type: obj.type,
+        },
+      });
+    }
+    return url;
+  };
+
+  // Log de todos os elementos video existentes na página
+  setTimeout(() => {
+    const existingVideos = document.querySelectorAll("video");
+    console.log(
+      `[Udemy Video Detector] ${existingVideos.length} elementos video encontrados na página`
+    );
+    existingVideos.forEach((video, index) => {
+      console.log(`[Udemy Video Detector] Video ${index}:`, {
+        src: video.src,
+        currentSrc: video.currentSrc,
+        readyState: video.readyState,
+        networkState: video.networkState,
+      });
+    });
+  }, 3000);
+}
+
 if (document.readyState === "loading") {
   document.addEventListener("DOMContentLoaded", () => {
     videoDetector = new UniversalVideoDetector();
@@ -1705,7 +2181,21 @@ if (document.readyState === "loading") {
 
 // Escuta mensagens da extensão
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (message.type === "ping") {
+    console.log("[NotificationIDM] Ping recebido do popup");
+    sendResponse({ success: true, message: "Content script ativo" });
+    return true;
+  }
+
   if (message.type === "force_scan") {
-    videoDetector.scanForVideos();
+    console.log("[NotificationIDM] Recebida mensagem force_scan do popup");
+    try {
+      videoDetector.scanForVideos();
+      sendResponse({ success: true, message: "Scan forçado executado" });
+    } catch (error) {
+      console.error("[NotificationIDM] Erro no force_scan:", error);
+      sendResponse({ success: false, error: error.message });
+    }
+    return true; // Indica que vai responder assincronamente
   }
 });

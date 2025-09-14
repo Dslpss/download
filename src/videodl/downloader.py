@@ -93,6 +93,31 @@ class VideoDownloader:
                     'Sec-Fetch-Mode': 'cors',
                     'Sec-Fetch-Site': 'cross-site'
                 })
+            
+            # Configuração especial para Udemy
+            elif 'udemy.com' in url.lower():
+                logger.info("[IDM-like] Detectado Udemy - aplicando configurações específicas")
+                ydl_opts['extract_flat'] = False  # Precisamos de dados completos 
+                ydl_opts['nocheckcertificate'] = True
+                # Headers específicos para Udemy
+                ydl_opts['http_headers'].update({
+                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+                    'Accept-Language': 'pt-BR,pt;q=0.9,en;q=0.8',
+                    'Accept-Encoding': 'gzip, deflate, br',
+                    'DNT': '1',
+                    'Connection': 'keep-alive',
+                    'Upgrade-Insecure-Requests': '1',
+                })
+                # Configurações específicas para contornar proteções da Udemy
+                ydl_opts['extractor_args'] = {
+                    'udemy': {
+                        'skip_subtitles': False,
+                        'skip_hls': False,
+                    }
+                }
+                # Força sleep entre requisições para evitar rate limiting
+                ydl_opts['sleep_interval'] = 1
+                ydl_opts['max_sleep_interval'] = 5
         with YoutubeDL(ydl_opts) as ydl:  # type: ignore
             info = ydl.extract_info(url, download=False)
             if not info:
@@ -152,6 +177,29 @@ class VideoDownloader:
                 # Configurações adicionais para BunnyCDN
                 ydl_opts['cookiefile'] = None
                 ydl_opts['nocheckcertificate'] = True
+                
+                # Configuração especial para Udemy
+                if 'udemy.com' in url.lower():
+                    logger.info("[IDM-like] Detectado Udemy em playlist_videos - aplicando configurações específicas")
+                    # Headers específicos para Udemy
+                    ydl_opts['http_headers'].update({
+                        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+                        'Accept-Language': 'pt-BR,pt;q=0.9,en;q=0.8',
+                        'Accept-Encoding': 'gzip, deflate, br',
+                        'DNT': '1',
+                        'Connection': 'keep-alive',
+                        'Upgrade-Insecure-Requests': '1',
+                    })
+                    # Configurações específicas para contornar proteções da Udemy
+                    ydl_opts['extractor_args'] = {
+                        'udemy': {
+                            'skip_subtitles': False,
+                            'skip_hls': False,
+                        }
+                    }
+                    # Força sleep entre requisições
+                    ydl_opts['sleep_interval'] = 1
+                    ydl_opts['max_sleep_interval'] = 5
             
             with YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(url, download=False)
@@ -267,6 +315,128 @@ class VideoDownloader:
     # Interface pública para sanitização (útil para testes e outras camadas)
     def sanitize_filename(self, name: str) -> str:
         return self._sanitize(name)
+
+    def download_direct_url(self, url: str, output_dir: str, 
+                          title: str = "video",
+                          extra_headers: Optional[dict] = None,
+                          progress_cb: Optional[Callable[[Dict[str, Any]], None]] = None):
+        """
+        Baixa URL direta de vídeo (especialmente URLs interceptadas da Udemy)
+        sem usar extratores do yt-dlp
+        """
+
+        import mimetypes, subprocess, requests
+        self.reset_cancel()
+        os.makedirs(output_dir, exist_ok=True)
+
+        # Prepara headers
+        headers = dict(extra_headers) if extra_headers else {}
+        cookie_val = headers.get('Cookie')
+        if isinstance(cookie_val, dict):
+            headers['Cookie'] = '; '.join(f"{k}={v}" for k, v in cookie_val.items())
+        elif isinstance(cookie_val, list):
+            headers['Cookie'] = '; '.join(cookie_val)
+        if 'User-Agent' not in headers:
+            headers['User-Agent'] = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        if 'Referer' not in headers:
+            headers['Referer'] = 'https://www.udemy.com/'
+
+        # IDM-like: .m3u8/.mpd usa ffmpeg, .mp4/.ts usa requests
+        ext = os.path.splitext(url.split('?')[0])[1].lower()
+        outbase = os.path.join(output_dir, self._sanitize(title))
+        if ext in ['.m3u8', '.mpd']:
+            # Monta comando ffmpeg
+            ffmpeg_cmd = [
+                'ffmpeg', '-y',
+                '-hide_banner', '-loglevel', 'info',
+                '-headers', '\r\n'.join(f'{k}: {v}' for k, v in headers.items()) + '\r\n',
+                '-i', url,
+                '-c', 'copy',
+                f'{outbase}.mp4'
+            ]
+            logger.info(f"[IDM-like] ffmpeg: {' '.join(ffmpeg_cmd)}")
+            import re
+            try:
+                process = subprocess.Popen(ffmpeg_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1)
+                duration = None
+                time_pattern = re.compile(r'time=(\d+):(\d+):(\d+)\.(\d+)')
+                duration_pattern = re.compile(r'Duration: (\d+):(\d+):(\d+)\.(\d+)')
+                last_percent = 0
+                for line in process.stderr:
+                    logger.debug(f"[ffmpeg] {line.rstrip()}")
+                    if duration is None:
+                        m = duration_pattern.search(line)
+                        if m:
+                            h, m_, s, ms = map(int, m.groups())
+                            duration = h*3600 + m_*60 + s + ms/100.0
+                    m = time_pattern.search(line)
+                    if m and duration:
+                        h, m_, s, ms = map(int, m.groups())
+                        current = h*3600 + m_*60 + s + ms/100.0
+                        percent = min(100, int(current/duration*100))
+                        if percent > last_percent:
+                            if progress_cb:
+                                progress_cb({'status': 'downloading', '_percent_str': str(percent), '_speed_str': '', 'filename': f'{outbase}.mp4'})
+                            last_percent = percent
+                process.wait()
+                if process.returncode != 0:
+                    raise Exception(f'ffmpeg failed: {process.returncode}')
+                logger.info(f"[IDM-like] Download ffmpeg concluído: {outbase}.mp4")
+                if progress_cb:
+                    progress_cb({'status': 'finished', 'filename': f'{outbase}.mp4'})
+                return
+            except Exception as e:
+                logger.error(f"[IDM-like] Erro ffmpeg: {e}")
+                raise
+        elif ext in ['.mp4', '.ts']:
+            # Download bruto via requests
+            logger.info(f"[IDM-like] Download bruto: {url}")
+            resp = requests.get(url, headers=headers, stream=True)
+            resp.raise_for_status()
+            outpath = f'{outbase}{ext}'
+            with open(outpath, 'wb') as f:
+                for chunk in resp.iter_content(chunk_size=8192):
+                    if chunk:
+                        f.write(chunk)
+            logger.info(f"[IDM-like] Download requests concluído: {outpath}")
+            if progress_cb:
+                progress_cb({'status': 'finished', 'filename': outpath})
+            return
+        # Fallback: yt-dlp
+        if YoutubeDL is None:
+            raise RuntimeError("yt_dlp não está instalado ou falhou ao importar.")
+        def _hook(d):
+            if d.get('status') == 'downloading':
+                try:
+                    self._check_cancel()
+                except DownloadCancelled:
+                    raise
+            if progress_cb:
+                progress_cb(d)
+        ydl_opts = {
+            'outtmpl': os.path.join(output_dir, f'{self._sanitize(title)}.%(ext)s'),
+            'progress_hooks': [_hook],
+            'no_warnings': False,
+            'extractaudio': False,
+            'audioformat': 'mp3',
+            'format': 'best',
+            'writesubtitles': False,
+            'writeautomaticsub': False,
+            'nocheckcertificate': True,
+            'http_headers': headers,
+            'socket_timeout': 30,
+            'retries': 3,
+            'sleep_interval': 1,
+            'max_sleep_interval': 3,
+        }
+        with YoutubeDL(ydl_opts) as ydl:
+            try:
+                logger.info(f"[Direct Download] Fallback yt-dlp: {url}")
+                ydl.download([url])
+                logger.info(f"[Direct Download] Download concluído com sucesso")
+            except Exception as e:
+                logger.error(f"[Direct Download] Erro no download: {e}")
+                raise
 
     def download(self, url: str, output_dir: str, format_id: Optional[str], only_audio: bool,
                  playlist_mode: bool = False, write_thumbnail: bool = False,
@@ -427,6 +597,38 @@ class VideoDownloader:
                     'Sec-Fetch-Mode': 'cors',
                     'Sec-Fetch-Site': 'cross-site'
                 })
+            
+            # Configuração especial para Udemy
+            elif 'udemy.com' in url.lower():
+                logger.info("[IDM-like] Detectado Udemy no download - aplicando configurações específicas")
+                # Headers específicos para Udemy
+                if 'http_headers' not in ydl_opts:
+                    ydl_opts['http_headers'] = {}
+                ydl_opts['http_headers'].update({
+                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+                    'Accept-Language': 'pt-BR,pt;q=0.9,en;q=0.8',
+                    'Accept-Encoding': 'gzip, deflate, br',
+                    'DNT': '1',
+                    'Connection': 'keep-alive',
+                    'Upgrade-Insecure-Requests': '1',
+                    'Sec-Fetch-Dest': 'document',
+                    'Sec-Fetch-Mode': 'navigate',
+                    'Sec-Fetch-Site': 'none',
+                    'Sec-GPC': '1'
+                })
+                # Configurações específicas para contornar proteções da Udemy
+                ydl_opts['extractor_args'] = {
+                    'udemy': {
+                        'skip_subtitles': False,
+                        'skip_hls': False,
+                        'business': True,  # Tenta modo business da Udemy
+                    }
+                }
+                # Configurações adicionais para Udemy
+                ydl_opts['sleep_interval'] = 2  # Mais sleep para evitar rate limiting
+                ydl_opts['max_sleep_interval'] = 10
+                ydl_opts['socket_timeout'] = 60  # Timeout maior para Udemy
+                ydl_opts['retries'] = 3  # Mais tentativas
         
         
         # Se temos itens selecionados específicos da playlist

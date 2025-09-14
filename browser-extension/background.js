@@ -1,3 +1,41 @@
+// === Interceptação UNIVERSAL de vídeos ===
+function isUniversalVideoUrl(url) {
+  // Só aceita arquivos completos ou playlists (ignora segmentos .ts, .m4s, .chunk, .frag)
+  // Aceita: mp4, webm, mov, avi, mkv, m4v, 3gp, flv, m3u8, mpd
+  // Ignora: ts, m4s, chunk, frag
+  return /\.(mp4|webm|mov|avi|mkv|m4v|3gp|flv|m3u8|mpd)([?#].*)?$/i.test(url);
+}
+
+function hashUrl(url) {
+  // Simples hash para chave (evita problemas de tamanho)
+  let hash = 0;
+  for (let i = 0; i < url.length; i++) {
+    hash = (hash << 5) - hash + url.charCodeAt(i);
+    hash |= 0;
+  }
+  return Math.abs(hash).toString(36);
+}
+
+chrome.webRequest.onBeforeRequest.addListener(
+  function (details) {
+    if (isUniversalVideoUrl(details.url)) {
+      const key = `video_url_${hashUrl(details.url)}`;
+      chrome.storage.local.set({
+        [key]: {
+          url: details.url,
+          timestamp: Date.now(),
+          tabId: details.tabId,
+          type: details.type,
+        },
+      });
+      console.log("[UNIVERSAL-BG] URL de vídeo interceptada:", details.url);
+    }
+  },
+  {
+    urls: ["<all_urls>"],
+  },
+  []
+);
 // Background script - Intercepta requisições como o IDM
 console.log("Video Downloader Background - Interceptação IDM-like iniciada");
 
@@ -95,6 +133,30 @@ function isVideoRequest(url) {
     return true;
   }
   if (url.includes("bunnycdn.com") || url.includes("b-cdn.net")) {
+    return true;
+  }
+
+  // URLs específicas da Udemy que podem conter vídeos
+  if (url.includes("udemy.com")) {
+    // Intercepta requisições de API da Udemy que podem ter URLs de vídeo
+    if (
+      url.includes("/media-src/") ||
+      url.includes("/assets/") ||
+      url.includes("/course-taking/") ||
+      url.includes("/video/") ||
+      url.includes("cloudfront.net") ||
+      url.includes("stream") ||
+      url.includes("hls")
+    ) {
+      return true;
+    }
+  }
+
+  // CloudFront (usado pela Udemy)
+  if (
+    url.includes("cloudfront.net") &&
+    (url.includes("video") || url.includes("stream") || url.includes("media"))
+  ) {
     return true;
   }
 
